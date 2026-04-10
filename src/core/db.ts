@@ -72,16 +72,9 @@ export async function initSchema(): Promise<void> {
   await conn.unsafe(schemaSql);
 }
 
-export async function withTransaction<T>(fn: () => Promise<T>): Promise<T> {
+export async function withTransaction<T>(fn: (tx: ReturnType<typeof postgres>) => Promise<T>): Promise<T> {
   const conn = getConnection();
   return conn.begin(async (tx) => {
-    // Temporarily swap global connection to transaction
-    const prev = sql;
-    sql = tx as unknown as ReturnType<typeof postgres>;
-    try {
-      return await fn();
-    } finally {
-      sql = prev;
-    }
+    return fn(tx as unknown as ReturnType<typeof postgres>);
   });
 }

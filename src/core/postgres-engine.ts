@@ -70,19 +70,14 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async transaction<T>(fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
-    if (this._sql) {
-      // Instance connection: use .begin() directly, no global swap
-      return this._sql.begin(async (tx) => {
-        const prev = this._sql;
-        this._sql = tx as unknown as ReturnType<typeof postgres>;
-        try {
-          return await fn(this);
-        } finally {
-          this._sql = prev;
-        }
-      });
-    }
-    return db.withTransaction(() => fn(this));
+    const conn = this._sql || db.getConnection();
+    return conn.begin(async (tx) => {
+      // Create a scoped engine with tx as its connection, no shared state mutation
+      const txEngine = Object.create(this) as PostgresEngine;
+      Object.defineProperty(txEngine, 'sql', { get: () => tx });
+      Object.defineProperty(txEngine, '_sql', { value: tx as unknown as ReturnType<typeof postgres>, writable: false });
+      return fn(txEngine);
+    });
   }
 
   // Pages CRUD
@@ -97,7 +92,7 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async putPage(slug: string, page: PageInput): Promise<Page> {
-    validateSlug(slug);
+    slug = validateSlug(slug);
     const sql = this.sql;
     const hash = page.content_hash || contentHash(page.compiled_truth, page.timeline || '');
     const frontmatter = page.frontmatter || {};
@@ -182,7 +177,7 @@ export class PostgresEngine implements BrainEngine {
     const limit = opts?.limit || 20;
 
     const rows = await sql`
-      SELECT
+      SELECT DISTINCT ON (p.slug)
         p.slug, p.id as page_id, p.title, p.type,
         cc.chunk_text, cc.chunk_source,
         ts_rank(p.search_vector, websearch_to_tsquery('english', ${query})) AS score,
@@ -192,9 +187,11 @@ export class PostgresEngine implements BrainEngine {
       FROM pages p
       JOIN content_chunks cc ON cc.page_id = p.id
       WHERE p.search_vector @@ websearch_to_tsquery('english', ${query})
-      ORDER BY score DESC
-      LIMIT ${limit}
+      ORDER BY p.slug, score DESC
     `;
+    // Re-sort by score (DISTINCT ON requires ORDER BY slug first) and apply limit
+    rows.sort((a: any, b: any) => b.score - a.score);
+    rows.splice(limit);
 
     return rows.map(rowToSearchResult);
   }
@@ -231,37 +228,50 @@ export class PostgresEngine implements BrainEngine {
     if (pages.length === 0) throw new Error(`Page not found: ${slug}`);
     const pageId = pages[0].id;
 
-    // Delete existing chunks for this page
-    await sql`DELETE FROM content_chunks WHERE page_id = ${pageId}`;
+    // Remove chunks that no longer exist (chunk_index beyond new count)
+    const newIndices = chunks.map(c => c.chunk_index);
+    if (newIndices.length > 0) {
+      await sql`DELETE FROM content_chunks WHERE page_id = ${pageId} AND chunk_index != ALL(${newIndices})`;
+    } else {
+      await sql`DELETE FROM content_chunks WHERE page_id = ${pageId}`;
+      return;
+    }
 
-    // Bulk insert chunks — build multi-row VALUES to reduce round-trips
-    if (chunks.length === 0) return;
-
-    // postgres.js tagged templates don't handle vector casting in bulk,
-    // so we build a parameterized raw SQL query
-    const cols = '(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at)';
-    const rows: string[] = [];
-    const params: unknown[] = [];
-    let paramIdx = 1;
-
+    // Upsert chunks — preserves existing embeddings when new embedding is undefined
     for (const chunk of chunks) {
       const embeddingStr = chunk.embedding
         ? '[' + Array.from(chunk.embedding).join(',') + ']'
         : null;
 
       if (embeddingStr) {
-        rows.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::vector, $${paramIdx++}, $${paramIdx++}, now())`);
-        params.push(pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source, embeddingStr, chunk.model || 'text-embedding-3-large', chunk.token_count || null);
+        await sql.unsafe(
+          `INSERT INTO content_chunks (page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at)
+           VALUES ($1, $2, $3, $4, $5::vector, $6, $7, now())
+           ON CONFLICT (page_id, chunk_index) DO UPDATE SET
+             chunk_text = EXCLUDED.chunk_text,
+             chunk_source = EXCLUDED.chunk_source,
+             embedding = EXCLUDED.embedding,
+             model = EXCLUDED.model,
+             token_count = EXCLUDED.token_count,
+             embedded_at = EXCLUDED.embedded_at`,
+          [pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source, embeddingStr, chunk.model || 'text-embedding-3-large', chunk.token_count || null],
+        );
       } else {
-        rows.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, NULL)`);
-        params.push(pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source, chunk.model || 'text-embedding-3-large', chunk.token_count || null);
+        // No new embedding: preserve existing embedding via COALESCE
+        await sql.unsafe(
+          `INSERT INTO content_chunks (page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at)
+           VALUES ($1, $2, $3, $4, NULL, $5, $6, NULL)
+           ON CONFLICT (page_id, chunk_index) DO UPDATE SET
+             chunk_text = EXCLUDED.chunk_text,
+             chunk_source = EXCLUDED.chunk_source,
+             embedding = COALESCE(content_chunks.embedding, EXCLUDED.embedding),
+             model = COALESCE(content_chunks.model, EXCLUDED.model),
+             token_count = EXCLUDED.token_count,
+             embedded_at = COALESCE(content_chunks.embedded_at, EXCLUDED.embedded_at)`,
+          [pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source, chunk.model || 'text-embedding-3-large', chunk.token_count || null],
+        );
       }
     }
-
-    await sql.unsafe(
-      `INSERT INTO content_chunks ${cols} VALUES ${rows.join(', ')}`,
-      params,
-    );
   }
 
   async getChunks(slug: string): Promise<Chunk[]> {
@@ -584,7 +594,7 @@ export class PostgresEngine implements BrainEngine {
 
   // Sync
   async updateSlug(oldSlug: string, newSlug: string): Promise<void> {
-    validateSlug(newSlug);
+    newSlug = validateSlug(newSlug);
     const sql = this.sql;
     await sql`UPDATE pages SET slug = ${newSlug}, updated_at = now() WHERE slug = ${oldSlug}`;
   }
@@ -613,12 +623,13 @@ export class PostgresEngine implements BrainEngine {
 }
 
 // Helpers
-function validateSlug(slug: string): void {
+function validateSlug(slug: string): string {
   // Git is the system of record — slugs are lowercased repo-relative paths.
-  // Only reject empty, path traversal (..), and leading slash.
   if (!slug || /\.\./.test(slug) || /^\//.test(slug)) {
     throw new Error(`Invalid slug: "${slug}". Slugs cannot be empty, start with /, or contain path traversal.`);
   }
+  // Normalize to lowercase — all entry points (pathToSlug, inferSlug, frontmatter, direct writes) go through here
+  return slug.toLowerCase();
 }
 
 function contentHash(compiledTruth: string, timeline: string): string {

@@ -113,5 +113,5 @@ export function pathToSlug(filePath: string, repoPrefix?: string): string {
   slug = slug.replace(/^\//, '');
   // Add repo prefix for multi-repo setups
   if (repoPrefix) slug = `${repoPrefix}/${slug}`;
-  return slug;
+  return slug.toLowerCase();
 }

@@ -45,19 +45,25 @@ export function dedupResults(
 }
 
 /**
- * Layer 1: Keep only the highest-scoring chunk per page.
+ * Layer 1: Keep top 3 chunks per page (not just 1).
+ * Later layers (text similarity, cap per page) handle further reduction.
  */
 function dedupBySource(results: SearchResult[]): SearchResult[] {
-  const byPage = new Map<string, SearchResult>();
+  const byPage = new Map<string, SearchResult[]>();
 
   for (const r of results) {
-    const existing = byPage.get(r.slug);
-    if (!existing || r.score > existing.score) {
-      byPage.set(r.slug, r);
-    }
+    const existing = byPage.get(r.slug) || [];
+    existing.push(r);
+    byPage.set(r.slug, existing);
   }
 
-  return Array.from(byPage.values()).sort((a, b) => b.score - a.score);
+  const kept: SearchResult[] = [];
+  for (const chunks of byPage.values()) {
+    chunks.sort((a, b) => b.score - a.score);
+    kept.push(...chunks.slice(0, 3));
+  }
+
+  return kept.sort((a, b) => b.score - a.score);
 }
 
 /**

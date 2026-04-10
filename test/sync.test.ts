@@ -94,8 +94,8 @@ describe('pathToSlug', () => {
     expect(pathToSlug('people/pedro-franceschi.md')).toBe('people/pedro-franceschi');
   });
 
-  test('preserves case', () => {
-    expect(pathToSlug('People/Pedro-Franceschi.md')).toBe('People/Pedro-Franceschi');
+  test('normalizes to lowercase', () => {
+    expect(pathToSlug('People/Pedro-Franceschi.md')).toBe('people/pedro-franceschi');
   });
 
   test('strips leading slash', () => {
