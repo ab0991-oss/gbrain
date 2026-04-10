@@ -131,6 +131,16 @@ async function uploadFile(args: string[]) {
     return;
   }
 
+  // Upload to storage backend if configured
+  const { loadConfig } = await import('../core/config.ts');
+  const config = loadConfig();
+  if (config?.storage) {
+    const { createStorage } = await import('../core/storage.ts');
+    const storage = await createStorage(config.storage as any);
+    const content = readFileSync(filePath);
+    await storage.upload(storagePath, content, mimeType || undefined);
+  }
+
   await sql`
     INSERT INTO files (page_slug, filename, storage_path, mime_type, size_bytes, content_hash, metadata)
     VALUES (${pageSlug}, ${filename}, ${storagePath}, ${mimeType}, ${stat.size}, ${hash}, ${'{}'}::jsonb)
@@ -308,10 +318,31 @@ async function redirectFiles(args: string[]) {
     return;
   }
 
+  // Verify remote files exist before deleting locals
+  const { loadConfig } = await import('../core/config.ts');
+  const config = loadConfig();
+  let storage: any = null;
+  if (config?.storage) {
+    const { createStorage } = await import('../core/storage.ts');
+    storage = await createStorage(config.storage as any);
+  }
+
   let redirected = 0;
+  let skippedMissing = 0;
   for (const filePath of files) {
     const relPath = relative(dir, filePath);
     const hash = fileHash(filePath);
+
+    // Verify remote exists before deleting local
+    if (storage) {
+      const remoteExists = await storage.exists(relPath);
+      if (!remoteExists) {
+        console.error(`  Skipping ${relPath}: not found in remote storage (would lose data)`);
+        skippedMissing++;
+        continue;
+      }
+    }
+
     const breadcrumb = stringify({
       moved_to: 'storage',
       bucket: marker.bucket || 'brain-files',
@@ -325,6 +356,9 @@ async function redirectFiles(args: string[]) {
   }
 
   console.log(`Redirected ${redirected} files. Originals removed, breadcrumbs created.`);
+  if (skippedMissing > 0) {
+    console.log(`Skipped ${skippedMissing} files (not found in remote storage — run 'gbrain files mirror' first).`);
+  }
   console.log('To undo: gbrain files restore <dir>');
 }
 

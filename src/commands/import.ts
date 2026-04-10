@@ -109,13 +109,15 @@ export async function runImport(engine: BrainEngine, args: string[]) {
     processed++;
     if (processed % 100 === 0 || processed === files.length) {
       logProgress();
-      // Save checkpoint every 100 files
+      // Save checkpoint every 100 files — track completed file set, not just a counter
       if (processed % 100 === 0) {
         try {
           const cpDir = join(homedir(), '.gbrain');
           if (!existsSync(cpDir)) { const { mkdirSync } = await import('fs'); mkdirSync(cpDir, { recursive: true }); }
           writeFileSync(checkpointPath, JSON.stringify({
-            dir, totalFiles: allFiles.length, processedIndex: resumeIndex + processed,
+            dir, totalFiles: allFiles.length,
+            processedIndex: resumeIndex + processed,
+            completedFiles: importedSlugs.length + skipped,
             timestamp: new Date().toISOString(),
           }));
         } catch { /* non-fatal */ }
@@ -134,11 +136,13 @@ export async function runImport(engine: BrainEngine, args: string[]) {
       })
     );
 
-    const queue = [...files];
+    // Thread-safe queue: use an atomic index counter instead of array.shift()
+    let queueIndex = 0;
     await Promise.all(workerEngines.map(async (eng) => {
-      while (queue.length > 0) {
-        const file = queue.shift()!;
-        await processFile(eng, file);
+      while (true) {
+        const idx = queueIndex++;
+        if (idx >= files.length) break;
+        await processFile(eng, files[idx]);
       }
     }));
 
@@ -157,9 +161,11 @@ export async function runImport(engine: BrainEngine, args: string[]) {
     }
   }
 
-  // Clear checkpoint on successful completion
-  if (existsSync(checkpointPath)) {
+  // Clear checkpoint only on successful completion (no errors)
+  if (errors === 0 && existsSync(checkpointPath)) {
     try { unlinkSync(checkpointPath); } catch { /* non-fatal */ }
+  } else if (errors > 0 && existsSync(checkpointPath)) {
+    console.log(`  Checkpoint preserved (${errors} errors). Run again to retry failed files.`);
   }
 
   const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);

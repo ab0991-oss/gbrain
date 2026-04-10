@@ -581,14 +581,37 @@ const file_upload: Operation = {
       return { status: 'already_exists', storage_path: storagePath };
     }
 
-    await sql`
-      INSERT INTO files (page_slug, filename, storage_path, mime_type, size_bytes, content_hash, metadata)
-      VALUES (${pageSlug}, ${filename}, ${storagePath}, ${mimeType}, ${stat.size}, ${hash}, ${'{}'}::jsonb)
-      ON CONFLICT (storage_path) DO UPDATE SET
-        content_hash = EXCLUDED.content_hash,
-        size_bytes = EXCLUDED.size_bytes,
-        mime_type = EXCLUDED.mime_type
-    `;
+    // Upload to storage backend if configured
+    if (ctx.config.storage) {
+      const { createStorage } = await import('./storage.ts');
+      const storage = await createStorage(ctx.config.storage as any);
+      try {
+        await storage.upload(storagePath, content, mimeType || undefined);
+      } catch (uploadErr) {
+        throw new OperationError('storage_error', `Upload failed: ${uploadErr instanceof Error ? uploadErr.message : String(uploadErr)}`);
+      }
+    }
+
+    try {
+      await sql`
+        INSERT INTO files (page_slug, filename, storage_path, mime_type, size_bytes, content_hash, metadata)
+        VALUES (${pageSlug}, ${filename}, ${storagePath}, ${mimeType}, ${stat.size}, ${hash}, ${'{}'}::jsonb)
+        ON CONFLICT (storage_path) DO UPDATE SET
+          content_hash = EXCLUDED.content_hash,
+          size_bytes = EXCLUDED.size_bytes,
+          mime_type = EXCLUDED.mime_type
+      `;
+    } catch (dbErr) {
+      // Rollback: clean up storage if DB write failed
+      if (ctx.config.storage) {
+        try {
+          const { createStorage } = await import('./storage.ts');
+          const storage = await createStorage(ctx.config.storage as any);
+          await storage.delete(storagePath);
+        } catch { /* best effort cleanup */ }
+      }
+      throw dbErr;
+    }
 
     return { status: 'uploaded', storage_path: storagePath, size_bytes: stat.size };
   },
