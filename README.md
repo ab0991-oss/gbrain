@@ -612,6 +612,14 @@ TIMELINE
   gbrain timeline [<slug>]                  View timeline entries
   gbrain timeline-add <slug> <date> <text>  Add timeline entry
 
+ACTION BRAIN (commitment/obligation tracking)
+  gbrain action list [--status S --owner O] List action items (open by default)
+  gbrain action brief                       Morning priority brief from WhatsApp commitments
+  gbrain action resolve <id>                Mark an action item resolved
+  gbrain action mark-fp <id>                Mark extraction as false positive
+  gbrain action ingest [--messages-json J]  Extract and ingest commitments from a message batch
+  gbrain action run                         Auto-ingest pipeline: collect → extract → store (cron-ready)
+
 ADMIN
   gbrain doctor [--json]                    Health checks (pgvector, RLS, schema, embeddings)
   gbrain stats                              Brain statistics
