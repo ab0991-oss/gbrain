@@ -65,8 +65,8 @@ markdown files (tool-agnostic, work with both CLI and plugin contexts).
 - `src/action-brain/action-schema.ts` — PGLite DDL + idempotent schema init for action_items / action_history tables
 - `src/action-brain/action-engine.ts` — Storage layer: CRUD, priority scoring (urgency × confidence × recency), PGLite lifecycle; `createItemWithResult()` returns idempotency signal (created vs skipped)
 - `src/action-brain/extractor.ts` — LLM commitment extraction (Sonnet default; quality gate uses Haiku→Sonnet escalation), `stabilizeCommitments()` for message-grounded actor normalization, XML delimiter defense, stable source IDs, owner context injection
-- `src/action-brain/brief.ts` — Morning priority brief generator: ranked action items, overdue detection, deduplication
-- `src/action-brain/collector.ts` — Wacli message collector: reads WhatsApp export files, deduplicates by message ID, checkpoint-aware (skips already-processed messages)
+- `src/action-brain/brief.ts` — Morning priority brief generator: ranked action items, overdue detection, deduplication; freshness reads from wacli checkpoint (not action item creation time)
+- `src/action-brain/collector.ts` — Wacli message collector: invokes `wacli messages list` CLI, deduplicates by message ID, checkpoint-aware cursor (skips already-processed messages), heartbeat freshness on no-op polls
 - `src/action-brain/ingest-runner.ts` — Auto-ingest orchestrator: preflight checks, staleness gate, collect → extract → store pipeline; cron-ready, returns structured JSON
 - `src/action-brain/operations.ts` — 6 Action Brain operations (action_list, action_brief, action_resolve, action_mark_fp, action_ingest, action_ingest_auto)
 
@@ -80,7 +80,7 @@ Key commands added in v0.7:
 
 ## Testing
 
-`bun test` runs all tests (35 unit test files + 5 E2E test files). Unit tests run
+`bun test` runs all tests (44 unit test files + 6 E2E test files). Unit tests run
 without a database. E2E tests skip gracefully when `DATABASE_URL` is not set.
 
 Unit tests: `test/markdown.test.ts` (frontmatter parsing), `test/chunkers/recursive.test.ts`
@@ -111,11 +111,16 @@ parity), `test/cli.test.ts` (CLI structure), `test/config.test.ts` (config redac
 `test/action-brain/collector.test.ts` (wacli file reading, checkpoint store, dedup, freshness filtering),
 `test/action-brain/ingest-runner.test.ts` (preflight checks, staleness gate, collect/extract/store pipeline, structured JSON output),
 `test/action-brain/operations.test.ts` (all 6 ops, ingest trust boundary, batch fallbacks, action_ingest_auto pipeline),
-`test/action-brain/e2e-live-validation-metrics.test.ts` (matchCommitment unit tests: alias matching, type compatibility, action substring matching).
+`test/action-brain/e2e-live-validation-metrics.test.ts` (matchCommitment unit tests: alias matching, type compatibility, action substring matching),
+`test/embed.test.ts` (embedding batch + retry logic), `test/import-walker.test.ts` (file walker + gitignore filtering),
+`test/pglite-lock.test.ts` (PGLite lock/concurrency behavior), `test/search-limit.test.ts` (search result count limits).
 
 E2E tests (`test/e2e/`): Run against real Postgres+pgvector. Require `DATABASE_URL`.
 - `bun run test:e2e` runs Tier 1 (mechanical, all operations, no API keys)
+- `test/e2e/mechanical.test.ts` runs all operations against real Postgres+pgvector (Tier 1)
+- `test/e2e/mcp.test.ts` verifies MCP server startup and tool definitions (Tier 1, PGLite in-memory)
 - `test/e2e/search-quality.test.ts` runs search quality E2E against PGLite (no API keys, in-memory)
+- `test/e2e/sync.test.ts` tests file sync pipeline against real DB (Tier 1)
 - `test/e2e/upgrade.test.ts` runs check-update E2E against real GitHub API (network required)
 - Tier 2 (`skills.test.ts`) requires OpenClaw + API keys, runs nightly in CI
 - If `.env.testing` doesn't exist in this directory, check sibling worktrees for one:
