@@ -23,6 +23,7 @@ export interface ExtractCommitmentsOptions {
   client?: AnthropicLike;
   model?: string;
   timeoutMs?: number;
+  retryCount?: number;
   /** When true, extraction errors are re-thrown for pipeline-level retry handling. */
   throwOnError?: boolean;
   /** The name of the person whose obligations we are tracking (e.g. "Abhinav Bansal"). */
@@ -129,27 +130,41 @@ export async function extractCommitments(
   }
 
   const client = options.client ?? getClient();
-  const model = options.model ?? HAIKU_MODEL;
+  const model = options.model ?? SONNET_MODEL;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const retryCount = normalizeRetryCount(options.retryCount);
 
   const ownerName = options.ownerName ?? null;
   const ownerAliases = options.ownerAliases ?? [];
 
+  let lastError: unknown = null;
   try {
-    const response = await withTimeoutSignal(timeoutMs, (signal) =>
-      client.messages.create(buildExtractionRequest(model, messages, ownerName, ownerAliases), { signal })
-    );
-    const rawCommitments = parseCommitmentsFromResponse(response);
-    return normalizeCommitments(rawCommitments);
+    for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+      try {
+        const response = await withTimeoutSignal(timeoutMs, (signal) =>
+          client.messages.create(buildExtractionRequest(model, messages, ownerName, ownerAliases), { signal })
+        );
+        const rawCommitments = parseCommitmentsFromResponse(response);
+        return normalizeCommitments(rawCommitments);
+      } catch (err) {
+        lastError = err;
+        if (attempt === retryCount || !isRetryableExtractionError(err)) {
+          throw err;
+        }
+      }
+    }
   } catch (err) {
     if (options.throwOnError) {
       throw err instanceof Error ? err : new Error(String(err));
     }
     // Queueing/retry behavior lives in pipeline orchestration; extractor never throws on model failures.
     // Log so operators can distinguish "no commitments found" from "extraction failed".
-    console.error('[action-brain] Extraction failed:', err instanceof Error ? err.message : String(err));
+    const printable = lastError ?? err;
+    console.error('[action-brain] Extraction failed:', printable instanceof Error ? printable.message : String(printable));
     return [];
   }
+
+  return [];
 }
 
 export async function runCommitmentQualityGate(
@@ -513,6 +528,31 @@ function withTimeoutSignal<T>(
   return fn(controller.signal).finally(() => {
     clearTimeout(timeout);
   });
+}
+
+function normalizeRetryCount(value: unknown): number {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return 1;
+  }
+  return Math.min(3, Math.trunc(parsed));
+}
+
+function isRetryableExtractionError(err: unknown): boolean {
+  const message = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  const name = err instanceof Error ? err.name.toLowerCase() : '';
+  return (
+    name.includes('abort') ||
+    message.includes('aborted') ||
+    message.includes('timed out') ||
+    message.includes('timeout') ||
+    message.includes('overloaded') ||
+    message.includes('rate limit') ||
+    message.includes('429') ||
+    message.includes('529') ||
+    message.includes('econnreset') ||
+    message.includes('service unavailable')
+  );
 }
 
 function readString(value: unknown): string {

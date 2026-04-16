@@ -149,6 +149,57 @@ describe('Action Brain operation integration', () => {
     });
   });
 
+  test('action_ingest keeps replay idempotent when extractor wording/type drifts for the same source message', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const actionIngest = getActionOperation('action_ingest');
+      const messages = [
+        { ChatName: 'Operations', SenderName: 'Joe', Timestamp: '2026-04-16T08:00:00.000Z', Text: 'Send docs today', MsgID: 'm1' },
+      ];
+
+      const first = (await actionIngest.handler(ctx, {
+        messages,
+        commitments: [
+          {
+            who: 'Joe',
+            owes_what: 'Send docs',
+            to_whom: 'Abhi',
+            by_when: null,
+            confidence: 0.9,
+            type: 'commitment',
+            source_message_id: 'm1',
+          },
+        ],
+      })) as { created_count: number };
+
+      const second = (await actionIngest.handler(ctx, {
+        messages,
+        commitments: [
+          {
+            who: 'Joe',
+            owes_what: 'Send the documents by end of day',
+            to_whom: 'Abhi',
+            by_when: null,
+            confidence: 0.9,
+            type: 'follow_up',
+            source_message_id: 'm1',
+          },
+        ],
+      })) as { created_count: number };
+
+      const db = (engine as unknown as EngineWithDb).db;
+      const rows = await db.query(
+        `SELECT source_message_id, title
+         FROM action_items
+         ORDER BY source_message_id`
+      );
+
+      expect(first.created_count).toBe(1);
+      expect(second.created_count).toBe(0);
+      expect(rows.rows.length).toBe(1);
+      expect(rows.rows[0].source_message_id).toBe('m1:ab:0');
+    });
+  });
+
   test('action_ingest uses source_message_id for source thread/contact traceability', async () => {
     await withActionContext(async (ctx, engine) => {
       const actionIngest = getActionOperation('action_ingest');

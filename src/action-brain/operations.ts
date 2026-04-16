@@ -203,17 +203,20 @@ export const actionBrainOperations: Operation[] = [
         };
       }
 
+      const sourceOrdinalByMessageId = new Map<string, number>();
       const items = [];
+      let createdCount = 0;
       for (let i = 0; i < extracted.length; i += 1) {
         const commitment = extracted[i];
         const message = resolveSourceMessage(messages, commitment);
         const sourceMessageId = buildCommitmentSourceId(
           resolveSourceMessageId(messages, commitment, message),
-          commitment
+          commitment,
+          sourceOrdinalByMessageId
         );
         const dueAt = parseOptionalDate(commitment.by_when, 'by_when');
 
-        const item = await engine.createItem(
+        const result = await engine.createItemWithResult(
           {
             title: toActionTitle(commitment.owes_what),
             type: commitment.type,
@@ -234,12 +237,15 @@ export const actionBrainOperations: Operation[] = [
           }
         );
 
-        items.push(item);
+        if (result.created) {
+          createdCount += 1;
+        }
+        items.push(result.item);
       }
 
       return {
         extracted_count: extracted.length,
-        created_count: items.length,
+        created_count: createdCount,
         items,
       };
     },
@@ -497,10 +503,21 @@ function resolveSourceMessageId(
   return null;
 }
 
-function buildCommitmentSourceId(sourceMessageId: string | null, commitment: StructuredCommitment): string {
-  const baseMsgId = asOptionalNonEmptyString(sourceMessageId) ?? 'batch';
+function buildCommitmentSourceId(
+  sourceMessageId: string | null,
+  commitment: StructuredCommitment,
+  sourceOrdinalByMessageId: Map<string, number>
+): string {
+  const baseMsgId = asOptionalNonEmptyString(sourceMessageId);
+  if (baseMsgId) {
+    const nextOrdinal = sourceOrdinalByMessageId.get(baseMsgId) ?? 0;
+    sourceOrdinalByMessageId.set(baseMsgId, nextOrdinal + 1);
+    return `${baseMsgId}:ab:${nextOrdinal}`;
+  }
+
+  const batchKey = 'batch';
   const seed = [
-    baseMsgId,
+    batchKey,
     normalizeCommitmentField(commitment.who),
     normalizeCommitmentField(commitment.owes_what),
     normalizeCommitmentField(commitment.to_whom),
@@ -508,7 +525,7 @@ function buildCommitmentSourceId(sourceMessageId: string | null, commitment: Str
     commitment.type,
   ].join('|');
   const digest = createHash('sha256').update(seed).digest('hex').slice(0, 16);
-  return `${baseMsgId}:ab:${digest}`;
+  return `${batchKey}:ab:${digest}`;
 }
 
 function normalizeCommitmentField(value: string | null | undefined): string {
