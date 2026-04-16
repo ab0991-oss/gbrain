@@ -11,11 +11,65 @@ import { extractCommitments, type WhatsAppMessage, type StructuredCommitment } f
 
 interface GoldSetEntry {
   message: WhatsAppMessage;
-  expectedCommitments: Array<{
-    who: string;
-    action: string; // substring match on owes_what
-    type: string;
-  }>;
+  expectedCommitments: ExpectedCommitment[];
+}
+
+interface ExpectedCommitment {
+  who: string;
+  action: string; // substring match on owes_what
+  type: string;
+}
+
+const TYPE_EQUIVALENCE = {
+  owed_by_me: new Set(['commitment', 'delegation', 'follow_up']),
+  waiting_on: new Set(['commitment', 'delegation', 'follow_up']),
+} as const;
+
+export const OWNER_NAMES = ['abhinav bansal', 'abbhinaav', 'abhi', 'abhinav'];
+
+export function isOwnerName(name: string): boolean {
+  const normalized = name.toLowerCase();
+  return OWNER_NAMES.some((owner) => normalized.includes(owner));
+}
+
+export function matchCommitment(
+  extracted: StructuredCommitment,
+  expected: ExpectedCommitment
+): boolean {
+  const extractedWho = (extracted.who ?? '').toLowerCase();
+  const expectedWho = expected.who.toLowerCase();
+
+  // Owner name normalization: if expected is owner and extracted is any owner alias, match
+  const whoMatch = extractedWho.includes(expectedWho) ||
+    (isOwnerName(expectedWho) && isOwnerName(extractedWho));
+  const normalizedAction = normalizeActionForMatch(extracted.owes_what ?? '');
+  const normalizedExpectedAction = normalizeActionForMatch(expected.action);
+  const actionMatch = normalizedAction.includes(normalizedExpectedAction);
+  const typeMatch = isTypeCompatible(extracted.type, expected.type);
+
+  // Regression guard: action text must match. Type compatibility alone is insufficient.
+  return whoMatch && actionMatch && typeMatch;
+}
+
+function normalizeActionForMatch(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/authoris/g, 'authoriz')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function isTypeCompatible(extractedType: string, expectedType: string): boolean {
+  if (extractedType === expectedType) {
+    return true;
+  }
+
+  const equivalents = TYPE_EQUIVALENCE[expectedType as keyof typeof TYPE_EQUIVALENCE];
+  if (!equivalents) {
+    return false;
+  }
+
+  return equivalents.has(extractedType);
 }
 
 const GOLD_SET: GoldSetEntry[] = [
@@ -178,31 +232,6 @@ const GOLD_SET: GoldSetEntry[] = [
   },
 ];
 
-const OWNER_NAMES = ['abhinav bansal', 'abbhinaav', 'abhi', 'abhinav'];
-
-function isOwnerName(name: string): boolean {
-  return OWNER_NAMES.some(n => name.toLowerCase().includes(n));
-}
-
-function matchCommitment(
-  extracted: StructuredCommitment,
-  expected: { who: string; action: string; type: string }
-): boolean {
-  const extractedWho = (extracted.who ?? '').toLowerCase();
-  const expectedWho = expected.who.toLowerCase();
-
-  // Owner name normalization: if expected is owner and extracted is any owner alias, match
-  const whoMatch = extractedWho.includes(expectedWho) ||
-    (isOwnerName(expectedWho) && isOwnerName(extractedWho));
-  const actionMatch = extracted.owes_what?.toLowerCase().includes(expected.action.toLowerCase()) ?? false;
-  // Type matching: extraction types (commitment/delegation/follow_up) map to status (waiting_on/owed_by_me)
-  // so we match loosely here
-  const typeMatch = extracted.type === expected.type ||
-    (expected.type === 'owed_by_me' && ['commitment', 'delegation', 'follow_up'].includes(extracted.type)) ||
-    (expected.type === 'waiting_on' && ['commitment', 'delegation', 'follow_up'].includes(extracted.type));
-  return whoMatch && (actionMatch || typeMatch);
-}
-
 async function runValidation() {
   console.log('=== Action Brain E2E Live Validation ===\n');
   console.log(`Gold set: ${GOLD_SET.length} messages, ${GOLD_SET.reduce((n, g) => n + g.expectedCommitments.length, 0)} expected commitments\n`);
@@ -297,4 +326,6 @@ async function runValidation() {
   console.log(`Verdict: ${recall >= 0.9 ? '✅ PASS' : '❌ FAIL'}`);
 }
 
-runValidation().catch(console.error);
+if (import.meta.main) {
+  runValidation().catch(console.error);
+}

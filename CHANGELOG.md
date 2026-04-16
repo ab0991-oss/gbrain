@@ -2,7 +2,7 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.10.2] - 2026-04-16
+## [0.10.2] - 2026-04-17
 
 ### Added
 

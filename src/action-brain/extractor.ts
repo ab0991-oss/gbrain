@@ -259,6 +259,10 @@ async function evaluateQualityGate(
       client: options.client,
       model,
       timeoutMs: options.timeoutMs,
+      retryCount: options.retryCount,
+      throwOnError: options.throwOnError,
+      ownerName: options.ownerName,
+      ownerAliases: options.ownerAliases,
     });
     const comparison = compareCommitments(testCase.expected, predicted);
 

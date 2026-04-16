@@ -102,6 +102,24 @@
 
 **Context:** Identified by adversarial review during v0.10.0 ship.
 
+### Action Brain: extract shared utility module for duplicated pipeline helpers
+**What:** Move `buildCommitmentSourceId`, `toActionTitle`, `resolveSourceMessage`, `resolveSourceMessageId`, `asOptionalNonEmptyString`, `normalizeCommitmentField` into `src/action-brain/utils.ts`. These are currently duplicated across `operations.ts` and `ingest-runner.ts`. Also consolidate `clampConfidence` — operations.ts defaults to 0.5 while ingest-runner.ts defaults to 0, causing inconsistent DB values on edge-case LLM output.
+
+**Why:** DRY violation — 6 utility functions duplicated across files. The clampConfidence inconsistency can silently write different confidence values for the same LLM output depending on the call path.
+
+**Complexity:** Medium — safe refactor, but touches core pipeline code. Test coverage is good.
+
+**Context:** Identified during v0.10.2 ship pre-landing review.
+
+### Action Brain: fix N+1 message lookup in ingest pipeline
+**What:** In `runActionIngest`, `resolveSourceMessage` is called inside a loop over all commitments using `Array.find()`, creating O(commitments × messages) complexity. Pre-build a `Map<messageId, WhatsAppMessage>` before the loop.
+
+**Why:** For typical WhatsApp exports this is fine at MVP scale, but grows quadratically. Easy fix.
+
+**Complexity:** Low — add a `Map` before the store loop in `ingest-runner.ts`.
+
+**Context:** Identified during v0.10.2 ship pre-landing review.
+
 ## Completed
 
 ### Implement AWS Signature V4 for S3 storage backend
