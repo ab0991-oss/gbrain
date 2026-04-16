@@ -9,6 +9,13 @@ All notable changes to GBrain will be documented in this file.
 - **`gbrain action run` — cron-ready auto-ingest pipeline.** One command reads new WhatsApp messages from the wacli store, extracts commitments with the LLM extractor, and stores them in Action Brain. Checkpoint-aware: skips already-processed messages. Staleness gate: bails out if wacli data is older than `--stale-after-hours` (default 24h). Returns structured JSON with counts and errors — CI/cron-friendly.
 - **Morning brief is now checkpoint-aware.** `gbrain action brief` auto-reads the wacli checkpoint to compute message freshness — no more manually passing `--last-sync-at`. Pass `--checkpoint-path` to override the default location.
 - **Action item creation now returns idempotency signal.** `createItemWithResult()` tells callers whether an item was freshly inserted or already existed — so the ingest pipeline can report accurate created/skipped counts without extra DB queries.
+- **Wacli health checks before every ingest run.** The auto-ingest runner now verifies wacli's health state (`healthy` / `degraded` / `failed`) before touching your messages. A stale store (>24h no update) is reported as `degraded`; a disconnected store is `failed`. Scheduled runs can fail fast on degraded health with `--fail-on-degraded`, so your cron doesn't silently ingest stale data.
+- **Extraction retries on transient LLM errors.** `extractCommitments()` now retries on overload, rate limit, and timeout errors (configurable, default 1 retry) so a momentary API hiccup doesn't drop commitments from your pipeline.
+
+### Fixed
+
+- **Replay now produces stable, deduplicated source IDs.** When the same WhatsApp message is ingested twice — even if the LLM extracts slightly different wording or commitment type — the second run sees the existing item and skips it cleanly. Source IDs are now ordinal-based per message (`msg-id:ab:0`, `msg-id:ab:1`) rather than content-hashed, so dedup is reliable regardless of LLM drift between runs.
+- **`action_ingest` reports accurate created/skipped counts.** The operation now correctly reports how many items were freshly created vs. already existed, using the idempotency signal from the storage layer.
 
 ## [0.10.1] - 2026-04-16
 
