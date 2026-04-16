@@ -264,7 +264,7 @@ Run `gbrain --help` for the full list of commands.
 
 #### MCP server (Claude Code, Cursor, Windsurf, etc.)
 
-GBrain exposes 30 MCP tools via stdio. Add this to your MCP client config:
+GBrain exposes 35 MCP tools via stdio. Add this to your MCP client config:
 
 **Claude Code** (`~/.claude/server.json`):
 ```json
