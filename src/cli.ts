@@ -113,6 +113,9 @@ async function main() {
     const result = await op.handler(ctx, params);
     const output = formatResult(op.name, result);
     if (output) process.stdout.write(output);
+    if (operationResultIndicatesFailure(op.name, result)) {
+      process.exitCode = 1;
+    }
   } catch (e: unknown) {
     if (e instanceof OperationError) {
       console.error(`Error [${e.code}]: ${e.message}`);
@@ -170,6 +173,18 @@ function makeContext(engine: BrainEngine, params: Record<string, unknown>): Oper
     logger: { info: console.log, warn: console.warn, error: console.error },
     dryRun: (params.dry_run as boolean) || false,
   };
+}
+
+export function operationResultIndicatesFailure(opName: string, result: unknown): boolean {
+  if (opName !== 'action_ingest_auto') {
+    return false;
+  }
+
+  if (!result || typeof result !== 'object') {
+    return false;
+  }
+
+  return (result as { success?: unknown }).success === false;
 }
 
 function formatResult(opName: string, result: unknown): string {
@@ -506,7 +521,9 @@ function displayCliCommandName(name: string): string {
   return name;
 }
 
-main().catch(e => {
-  console.error(e.message || e);
-  process.exit(1);
-});
+if (import.meta.main) {
+  main().catch(e => {
+    console.error(e.message || e);
+    process.exit(1);
+  });
+}

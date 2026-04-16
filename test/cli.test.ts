@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'bun:test';
 import { readFileSync } from 'fs';
+import { operationResultIndicatesFailure } from '../src/cli.ts';
 
 // Read cli.ts source for structural checks
 const cliSource = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf-8');
@@ -24,6 +25,20 @@ describe('CLI structure', () => {
 
   test('has formatResult function for CLI output', () => {
     expect(cliSource).toContain('function formatResult');
+  });
+});
+
+describe('CLI operation failure exit handling', () => {
+  test('returns true for failed action auto-ingest summaries', () => {
+    expect(operationResultIndicatesFailure('action_ingest_auto', { success: false })).toBe(true);
+  });
+
+  test('returns false for successful action auto-ingest summaries', () => {
+    expect(operationResultIndicatesFailure('action_ingest_auto', { success: true })).toBe(false);
+  });
+
+  test('ignores non auto-ingest operation results', () => {
+    expect(operationResultIndicatesFailure('action_ingest', { success: false })).toBe(false);
   });
 });
 
