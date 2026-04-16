@@ -377,6 +377,60 @@ describe('Action Brain operation integration', () => {
     });
   });
 
+  test('action_ingest rejects ambiguous bare source_message_id values across stores', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const actionIngest = getActionOperation('action_ingest');
+      const messages = [
+        {
+          ChatName: 'Personal Ops',
+          SenderName: 'Joe',
+          Timestamp: '2026-04-16T08:00:00.000Z',
+          Text: 'Send docs',
+          MsgID: 'shared-msg',
+          store_key: 'personal',
+          store_path: '/stores/personal',
+        },
+        {
+          ChatName: 'Business Ops',
+          SenderName: 'Joe',
+          Timestamp: '2026-04-16T08:05:00.000Z',
+          Text: 'Send docs',
+          MsgID: 'shared-msg',
+          store_key: 'business',
+          store_path: '/stores/business',
+        },
+      ];
+      const commitments = [
+        {
+          who: 'Joe',
+          owes_what: 'Send docs',
+          to_whom: 'Abhi',
+          by_when: null,
+          confidence: 0.9,
+          type: 'commitment',
+          source_message_id: 'shared-msg',
+        },
+        {
+          who: 'Joe',
+          owes_what: 'Send docs',
+          to_whom: 'Abhi',
+          by_when: null,
+          confidence: 0.9,
+          type: 'commitment',
+          source_message_id: 'shared-msg',
+        },
+      ];
+
+      await expect(actionIngest.handler(ctx, { messages, commitments })).rejects.toThrow(
+        'Ambiguous source_message_id: shared-msg matches multiple store-qualified messages in this batch.'
+      );
+
+      const db = (engine as unknown as EngineWithDb).db;
+      const rows = await db.query(`SELECT source_message_id FROM action_items`);
+      expect(rows.rows).toEqual([]);
+    });
+  });
+
   test('action_brief resolves freshness from wacli checkpoint when last_sync_at is omitted', async () => {
     await withActionContext(async (ctx) => {
       const actionBrief = getActionOperation('action_brief');
