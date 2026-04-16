@@ -186,7 +186,7 @@ describe('runActionIngest', () => {
     });
   });
 
-  test('does not advance checkpoint when store stage fails', async () => {
+  test('rolls back all stored items and leaves checkpoint unchanged when a later store write fails', async () => {
     await withDb(async (db) => {
       const root = createTempDir();
       const checkpointPath = join(root, 'wacli-checkpoint.json');
@@ -201,7 +201,10 @@ describe('runActionIngest', () => {
         },
       });
 
-      const messages = [message('m4', '2026-04-16T10:00:00.000Z', 'Joe to send manifest')];
+      const messages = [
+        message('m4', '2026-04-16T10:00:00.000Z', 'Joe to send manifest'),
+        message('m5', '2026-04-16T10:02:00.000Z', 'Mukesh to confirm payout date'),
+      ];
       const summary = await runActionIngest({
         db,
         collectorOptions: { checkpointPath },
@@ -215,9 +218,9 @@ describe('runActionIngest', () => {
               storeKey: 'personal',
               storePath: '/stores/personal',
               checkpointBefore: '2026-04-15T22:00:00.000Z',
-              checkpointAfter: '2026-04-16T10:00:00.000Z',
-              batchSize: 1,
-              lastSyncAt: '2026-04-16T10:00:00.000Z',
+              checkpointAfter: '2026-04-16T10:02:00.000Z',
+              batchSize: 2,
+              lastSyncAt: '2026-04-16T10:02:00.000Z',
               degraded: false,
               degradedReason: null,
               error: null,
@@ -230,16 +233,17 @@ describe('runActionIngest', () => {
             version: 1,
             stores: {
               personal: {
-                after: '2026-04-16T10:00:00.000Z',
-                message_ids_at_after: ['m4'],
+                after: '2026-04-16T10:02:00.000Z',
+                message_ids_at_after: ['m5'],
                 updated_at: '2026-04-16T10:05:00.000Z',
               },
             },
           },
         }),
         extractor: async () => [
+          commitment('Joe', 'Send manifest', 'm4', 0.9),
           {
-            ...commitment('Joe', 'Send manifest', 'm4', 0.9),
+            ...commitment('Mukesh', 'Confirm payout date', 'm5', 0.95),
             by_when: 'not-a-date',
           },
         ],
@@ -247,10 +251,18 @@ describe('runActionIngest', () => {
 
       expect(summary.success).toBe(false);
       expect(summary.failure?.stage).toBe('store');
+      expect(summary.commitmentsCreated).toBe(0);
+      expect(summary.duplicatesSkipped).toBe(0);
       expect(summary.checkpointAdvanced).toBe(false);
 
       const checkpoint = await readWacliCollectorCheckpoint(checkpointPath);
       expect(checkpoint.stores.personal?.after).toBe('2026-04-15T22:00:00.000Z');
+
+      const itemRows = await db.query<{ count: number }>('SELECT count(*)::int AS count FROM action_items');
+      expect(itemRows.rows[0]?.count).toBe(0);
+
+      const historyRows = await db.query<{ count: number }>('SELECT count(*)::int AS count FROM action_history');
+      expect(historyRows.rows[0]?.count).toBe(0);
     });
   });
 

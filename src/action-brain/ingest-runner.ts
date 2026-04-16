@@ -143,40 +143,51 @@ export async function runActionIngest(options: RunActionIngestOptions): Promise<
 
   const engine = new ActionEngine(options.db);
   try {
-    for (const commitment of commitments) {
-      const sourceMessage = resolveSourceMessage(collection.messages, commitment);
-      const sourceMessageId = buildCommitmentSourceId(
-        resolveSourceMessageId(collection.messages, commitment, sourceMessage),
-        commitment
-      );
+    await engine.transaction(async () => {
+      let commitmentsCreated = 0;
+      let duplicatesSkipped = 0;
 
-      const result = await engine.createItemWithResult(
-        {
-          title: toActionTitle(commitment.owes_what),
-          type: commitment.type,
-          source_message_id: sourceMessageId,
-          owner: commitment.who ?? '',
-          waiting_on: null,
-          due_at: parseOptionalDate(commitment.by_when, 'by_when'),
-          confidence: clampConfidence(commitment.confidence),
-          source_thread: sourceMessage?.ChatName ?? '',
-          source_contact: sourceMessage?.SenderName ?? '',
-          linked_entity_slugs: [],
-        },
-        {
-          actor,
-          metadata: {
-            ingestion_mode: 'auto_runner',
+      for (const commitment of commitments) {
+        const sourceMessage = resolveSourceMessage(collection.messages, commitment);
+        const sourceMessageId = buildCommitmentSourceId(
+          resolveSourceMessageId(collection.messages, commitment, sourceMessage),
+          commitment
+        );
+
+        const result = await engine.createItemWithResult(
+          {
+            title: toActionTitle(commitment.owes_what),
+            type: commitment.type,
+            source_message_id: sourceMessageId,
+            owner: commitment.who ?? '',
+            waiting_on: null,
+            due_at: parseOptionalDate(commitment.by_when, 'by_when'),
+            confidence: clampConfidence(commitment.confidence),
+            source_thread: sourceMessage?.ChatName ?? '',
+            source_contact: sourceMessage?.SenderName ?? '',
+            linked_entity_slugs: [],
           },
-        }
-      );
+          {
+            actor,
+            metadata: {
+              ingestion_mode: 'auto_runner',
+            },
+          },
+          {
+            useTransaction: false,
+          }
+        );
 
-      if (result.created) {
-        summary.commitmentsCreated += 1;
-      } else {
-        summary.duplicatesSkipped += 1;
+        if (result.created) {
+          commitmentsCreated += 1;
+        } else {
+          duplicatesSkipped += 1;
+        }
       }
-    }
+
+      summary.commitmentsCreated = commitmentsCreated;
+      summary.duplicatesSkipped = duplicatesSkipped;
+    });
   } catch (err) {
     summary.failure = toFailure('store', err);
     return summary;

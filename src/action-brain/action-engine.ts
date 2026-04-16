@@ -59,6 +59,10 @@ export interface CreateActionItemResult {
   created: boolean;
 }
 
+interface ActionExecutionOptions {
+  useTransaction?: boolean;
+}
+
 export interface ListActionItemsFilters {
   status?: ActionStatus;
   owner?: string;
@@ -84,6 +88,10 @@ export class ActionTransitionError extends Error {
 export class ActionEngine {
   constructor(private readonly db: ActionDb) {}
 
+  async transaction<T>(fn: () => Promise<T>): Promise<T> {
+    return this.withTransaction(fn);
+  }
+
   async createItem(input: CreateActionItemInput, options: ActionMutationOptions = {}): Promise<ActionItem> {
     const result = await this.createItemWithResult(input, options);
     return result.item;
@@ -91,9 +99,10 @@ export class ActionEngine {
 
   async createItemWithResult(
     input: CreateActionItemInput,
-    options: ActionMutationOptions = {}
+    options: ActionMutationOptions = {},
+    execution: ActionExecutionOptions = {}
   ): Promise<CreateActionItemResult> {
-    return this.withTransaction(async () => {
+    const execute = async () => {
       const result = await this.db.query<ActionInsertRow>(
         `WITH inserted AS (
            INSERT INTO action_items (
@@ -159,7 +168,13 @@ export class ActionEngine {
         item: mapActionItem(row),
         created: toBoolean(row.was_inserted),
       };
-    });
+    };
+
+    if (execution.useTransaction === false) {
+      return execute();
+    }
+
+    return this.withTransaction(execute);
   }
 
   async getItem(id: number): Promise<ActionItem | null> {
