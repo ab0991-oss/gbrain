@@ -23,6 +23,8 @@ export interface ExtractCommitmentsOptions {
   client?: AnthropicLike;
   model?: string;
   timeoutMs?: number;
+  /** When true, extraction errors are re-thrown for pipeline-level retry handling. */
+  throwOnError?: boolean;
   /** The name of the person whose obligations we are tracking (e.g. "Abhinav Bansal"). */
   ownerName?: string;
   /** Known aliases for the owner (e.g. ["Abbhinaav", "Abhi"]). */
@@ -140,6 +142,9 @@ export async function extractCommitments(
     const rawCommitments = parseCommitmentsFromResponse(response);
     return normalizeCommitments(rawCommitments);
   } catch (err) {
+    if (options.throwOnError) {
+      throw err instanceof Error ? err : new Error(String(err));
+    }
     // Queueing/retry behavior lives in pipeline orchestration; extractor never throws on model failures.
     // Log so operators can distinguish "no commitments found" from "extraction failed".
     console.error('[action-brain] Extraction failed:', err instanceof Error ? err.message : String(err));

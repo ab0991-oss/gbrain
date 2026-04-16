@@ -1,8 +1,12 @@
 import { describe, expect, setDefaultTimeout, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 import { mergeOperationSets, operations } from '../../src/core/operations.ts';
 import type { Operation, OperationContext } from '../../src/core/operations.ts';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { actionBrainOperations } from '../../src/action-brain/operations.ts';
+import { writeWacliCollectorCheckpoint } from '../../src/action-brain/collector.ts';
 
 setDefaultTimeout(15_000);
 
@@ -56,6 +60,7 @@ describe('Action Brain operation integration', () => {
     expect(names.has('action_resolve')).toBe(true);
     expect(names.has('action_mark_fp')).toBe(true);
     expect(names.has('action_ingest')).toBe(true);
+    expect(names.has('action_ingest_auto')).toBe(true);
   });
 
   test('#23 mergeOperationSets fails fast on operation and CLI collisions', () => {
@@ -80,6 +85,20 @@ describe('Action Brain operation integration', () => {
 
     expect(exitCode).toBe(0);
     expect(stdout).toContain('Usage: gbrain action list');
+  });
+
+  test('supports grouped action auto-ingest command via "gbrain action run"', async () => {
+    const proc = Bun.spawn(['bun', 'run', 'src/cli.ts', 'action', 'run', '--help'], {
+      cwd: new URL('../..', import.meta.url).pathname,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+
+    const stdout = await new Response(proc.stdout).text();
+    const exitCode = await proc.exited;
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain('Usage: gbrain action run');
   });
 
   test('action_ingest stays idempotent when commitments arrive in different output order', async () => {
@@ -236,6 +255,36 @@ describe('Action Brain operation integration', () => {
       expect(rows.rows[0].source_message_id).toMatch(/^m1:ab:/);
       expect(rows.rows[0].source_thread).toBe('Operations');
       expect(rows.rows[0].source_contact).toBe('Joe');
+    });
+  });
+
+  test('action_brief resolves freshness from wacli checkpoint when last_sync_at is omitted', async () => {
+    await withActionContext(async (ctx) => {
+      const actionBrief = getActionOperation('action_brief');
+      const tempDir = mkdtempSync(join(tmpdir(), 'action-brief-checkpoint-test-'));
+      const checkpointPath = join(tempDir, 'wacli-checkpoint.json');
+
+      try {
+        await writeWacliCollectorCheckpoint(checkpointPath, {
+          version: 1,
+          stores: {
+            personal: {
+              after: '2026-04-16T11:30:00.000Z',
+              message_ids_at_after: ['m1'],
+              updated_at: '2026-04-16T11:31:00.000Z',
+            },
+          },
+        });
+
+        const result = (await actionBrief.handler(ctx, {
+          now: '2026-04-16T12:00:00.000Z',
+          checkpoint_path: checkpointPath,
+        })) as { brief: string };
+
+        expect(result.brief).toContain('wacli freshness: last sync 2026-04-16T11:30:00.000Z (0.5h ago)');
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
     });
   });
 });
