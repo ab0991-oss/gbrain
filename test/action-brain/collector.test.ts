@@ -80,8 +80,8 @@ describe('action-brain collector checkpoint storage', () => {
     });
 
     const checkpoint = await readWacliCollectorCheckpoint(checkpointPath);
-    expect(latestCheckpointSyncAt(checkpoint)).toBe('2026-04-16T05:00:00.000Z');
-    expect(await readWacliCollectorLastSyncAt(checkpointPath)).toBe('2026-04-16T05:00:00.000Z');
+    expect(latestCheckpointSyncAt(checkpoint)).toBe('2026-04-16T05:00:01.000Z');
+    expect(await readWacliCollectorLastSyncAt(checkpointPath)).toBe('2026-04-16T05:00:01.000Z');
   });
 });
 
@@ -258,6 +258,50 @@ describe('collectWacliMessages', () => {
     expect(result.stores[0]?.degraded).toBe(true);
     expect(result.stores[0]?.degradedReason).toBe('last_sync_stale');
     expect(result.stores[0]?.lastSyncAt).toBe('2026-04-15T09:00:00.000Z');
+  });
+
+  test('updates checkpoint heartbeat on successful no-new-message poll and keeps store healthy despite old messages', async () => {
+    const root = createTempDir();
+    const checkpointPath = join(root, 'wacli-checkpoint.json');
+    await writeWacliCollectorCheckpoint(checkpointPath, {
+      version: 1,
+      stores: {
+        personal: {
+          after: '2026-04-15T09:00:00.000Z',
+          message_ids_at_after: ['old-id'],
+          updated_at: '2026-04-15T09:05:00.000Z',
+        },
+      },
+    });
+
+    const runner: WacliListMessagesRunner = async (request) => {
+      expect(request.after).toBe('2026-04-15T09:00:00.000Z');
+      return {
+        success: true,
+        data: { messages: [] },
+        error: null,
+      };
+    };
+
+    const result = await collectWacliMessages({
+      checkpointPath,
+      stores: [{ key: 'personal', storePath: '/stores/personal' }],
+      staleAfterHours: 24,
+      now: new Date('2026-04-16T12:00:00.000Z'),
+      runner,
+    });
+
+    expect(result.degraded).toBe(false);
+    expect(result.stores[0]?.degraded).toBe(false);
+    expect(result.stores[0]?.degradedReason).toBeNull();
+    expect(result.stores[0]?.batchSize).toBe(0);
+    expect(result.stores[0]?.checkpointAfter).toBe('2026-04-15T09:00:00.000Z');
+    expect(result.stores[0]?.lastSyncAt).toBe('2026-04-16T12:00:00.000Z');
+
+    const stored = await readWacliCollectorCheckpoint(checkpointPath);
+    expect(stored.stores.personal?.after).toBe('2026-04-15T09:00:00.000Z');
+    expect(stored.stores.personal?.message_ids_at_after).toEqual(['old-id']);
+    expect(stored.stores.personal?.updated_at).toBe('2026-04-16T12:00:00.000Z');
   });
 
   test('does not persist checkpoint when persistCheckpoint=false', async () => {

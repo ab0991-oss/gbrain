@@ -411,6 +411,72 @@ describe('runActionIngest', () => {
       expect(extractorCalled).toBe(false);
     });
   });
+  test('persists checkpoint heartbeat after successful no-op poll and reports healthy from updated_at freshness', async () => {
+    await withDb(async (db) => {
+      const root = createTempDir();
+      const checkpointPath = join(root, 'wacli-checkpoint.json');
+      await writeWacliCollectorCheckpoint(checkpointPath, {
+        version: 1,
+        stores: {
+          personal: {
+            after: '2026-04-15T08:00:00.000Z',
+            message_ids_at_after: ['old-1'],
+            updated_at: '2026-04-15T08:05:00.000Z',
+          },
+        },
+      });
+
+      const summary = await runActionIngest({
+        db,
+        collectorOptions: { checkpointPath },
+        collector: async (_options: CollectWacliMessagesOptions): Promise<WacliCollectionResult> => ({
+          collectedAt: '2026-04-16T12:00:00.000Z',
+          checkpointPath,
+          limit: 200,
+          staleAfterHours: 24,
+          stores: [
+            {
+              storeKey: 'personal',
+              storePath: '/stores/personal',
+              checkpointBefore: '2026-04-15T08:00:00.000Z',
+              checkpointAfter: '2026-04-15T08:00:00.000Z',
+              batchSize: 0,
+              lastSyncAt: '2026-04-16T12:00:00.000Z',
+              degraded: false,
+              degradedReason: null,
+              error: null,
+              messages: [],
+            },
+          ],
+          messages: [],
+          degraded: false,
+          checkpoint: {
+            version: 1,
+            stores: {
+              personal: {
+                after: '2026-04-15T08:00:00.000Z',
+                message_ids_at_after: ['old-1'],
+                updated_at: '2026-04-16T12:00:00.000Z',
+              },
+            },
+          },
+        }),
+        extractor: async () => [],
+      });
+
+      expect(summary.success).toBe(true);
+      expect(summary.degraded).toBe(false);
+      expect(summary.healthStatus).toBe('healthy');
+      expect(summary.lastSyncAt).toBe('2026-04-16T12:00:00.000Z');
+      expect(summary.messagesScanned).toBe(0);
+      expect(summary.checkpointAdvanced).toBe(true);
+
+      const checkpoint = await readWacliCollectorCheckpoint(checkpointPath);
+      expect(checkpoint.stores.personal?.after).toBe('2026-04-15T08:00:00.000Z');
+      expect(checkpoint.stores.personal?.message_ids_at_after).toEqual(['old-1']);
+      expect(checkpoint.stores.personal?.updated_at).toBe('2026-04-16T12:00:00.000Z');
+    });
+  });
 });
 
 async function withDb<T>(fn: (db: ActionDb) => Promise<T>): Promise<T> {

@@ -337,7 +337,52 @@ describe('Action Brain operation integration', () => {
           checkpoint_path: checkpointPath,
         })) as { brief: string };
 
-        expect(result.brief).toContain('wacli freshness: last sync 2026-04-16T11:30:00.000Z (0.5h ago)');
+        expect(result.brief).toContain('wacli freshness: last sync 2026-04-16T11:31:00.000Z (0.5h ago)');
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  test('action_brief keeps freshness unknown when no explicit or checkpoint freshness exists', async () => {
+    await withActionContext(async (ctx) => {
+      const actionIngest = getActionOperation('action_ingest');
+      const actionBrief = getActionOperation('action_brief');
+
+      await actionIngest.handler(ctx, {
+        messages: [
+          {
+            ChatName: 'Operations',
+            SenderName: 'Joe',
+            Timestamp: '2026-04-16T08:00:00.000Z',
+            Text: 'Send docs',
+            MsgID: 'm-brief-unknown',
+          },
+        ],
+        commitments: [
+          {
+            who: 'Joe',
+            owes_what: 'Send docs',
+            to_whom: 'Abhi',
+            by_when: null,
+            confidence: 0.9,
+            type: 'commitment',
+            source_message_id: 'm-brief-unknown',
+          },
+        ],
+      });
+
+      const tempDir = mkdtempSync(join(tmpdir(), 'action-brief-unknown-checkpoint-test-'));
+      const checkpointPath = join(tempDir, 'missing-wacli-checkpoint.json');
+
+      try {
+        const result = (await actionBrief.handler(ctx, {
+          now: '2026-04-16T12:00:00.000Z',
+          checkpoint_path: checkpointPath,
+        })) as { brief: string };
+
+        expect(result.brief).toContain('wacli freshness: last sync unknown');
+        expect(result.brief).not.toContain('wacli freshness: last sync 2026-04-16T08:00:00.000Z');
       } finally {
         rmSync(tempDir, { recursive: true, force: true });
       }

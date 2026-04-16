@@ -3,8 +3,10 @@ import { ActionEngine } from './action-engine.ts';
 import {
   collectWacliMessages,
   defaultCollectorCheckpointPath,
+  readWacliCollectorCheckpoint,
   summarizeWacliHealth,
   type CollectWacliMessagesOptions,
+  type WacliCollectorCheckpointState,
   type WacliCollectionResult,
   type WacliHealthStatus,
   type WacliStoreCollectionResult,
@@ -92,6 +94,8 @@ export async function runActionIngest(options: RunActionIngestOptions): Promise<
     stores: [],
     failure: null,
   };
+
+  const checkpointBeforeRun = await readWacliCollectorCheckpoint(checkpointPath);
 
   let collection: WacliCollectionResult;
   try {
@@ -191,9 +195,7 @@ export async function runActionIngest(options: RunActionIngestOptions): Promise<
     return summary;
   }
 
-  // Only write the checkpoint file if at least one store advanced its cursor. Avoids redundant
-  // writes on empty incremental polls and keeps the checkpoint file as a reliable "something changed" signal.
-  const shouldPersistCheckpoint = collection.stores.some((store) => store.checkpointBefore !== store.checkpointAfter);
+  const shouldPersistCheckpoint = hasCheckpointChanged(checkpointBeforeRun, collection.checkpoint);
   if (!shouldPersistCheckpoint) {
     summary.success = true;
     return summary;
@@ -321,6 +323,41 @@ function asOptionalNonEmptyString(value: unknown): string | null {
   }
   const normalized = value.trim();
   return normalized.length > 0 ? normalized : null;
+}
+
+function hasCheckpointChanged(
+  before: WacliCollectorCheckpointState,
+  after: WacliCollectorCheckpointState
+): boolean {
+  const storeKeys = new Set<string>([
+    ...Object.keys(before.stores ?? {}),
+    ...Object.keys(after.stores ?? {}),
+  ]);
+
+  for (const key of storeKeys) {
+    const previous = before.stores?.[key];
+    const next = after.stores?.[key];
+
+    if (!previous || !next) {
+      return true;
+    }
+
+    if (previous.after !== next.after || previous.updated_at !== next.updated_at) {
+      return true;
+    }
+
+    if (previous.message_ids_at_after.length !== next.message_ids_at_after.length) {
+      return true;
+    }
+
+    for (let index = 0; index < previous.message_ids_at_after.length; index += 1) {
+      if (previous.message_ids_at_after[index] !== next.message_ids_at_after[index]) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 function ensureDate(value: Date, field: string): Date {

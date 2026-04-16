@@ -30,10 +30,6 @@ interface ActionItemRow {
   resolved_at: Date | string | null;
 }
 
-interface LastSyncRow {
-  last_sync_at: Date | string | null;
-}
-
 export type BriefContextEnricher = (
   items: ActionItem[]
 ) => Promise<Map<number, string> | Record<number, string>> | Map<number, string> | Record<number, string>;
@@ -99,14 +95,7 @@ export class MorningBriefGenerator {
     if (provided) {
       return ensureDate(provided, 'lastSyncAt');
     }
-
-    const result = await this.db.query<LastSyncRow>(
-      `SELECT max(created_at) AS last_sync_at
-       FROM action_items`
-    );
-
-    const raw = result.rows[0]?.last_sync_at ?? null;
-    return raw ? ensureDate(raw, 'last_sync_at') : null;
+    return null;
   }
 }
 

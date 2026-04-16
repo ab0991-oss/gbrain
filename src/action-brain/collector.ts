@@ -156,8 +156,11 @@ export async function collectWacliMessages(
         degradedReason = parsed.degradedReason ?? 'invalid_payload';
         error = parsed.error;
       } else {
-        lastSyncAt = latestTimestamp(parsed.messages);
+        const incrementalLastSyncAt = latestTimestamp(parsed.messages);
         newMessages = filterMessagesAfterCheckpoint(parsed.messages, existingCheckpoint);
+        // For stores with an established checkpoint cursor, a successful incremental poll
+        // is the best freshness signal even when there are no new messages.
+        lastSyncAt = existingCheckpoint.after ? now.toISOString() : incrementalLastSyncAt;
       }
     }
 
@@ -193,7 +196,9 @@ export async function collectWacliMessages(
       }
     }
 
-    const nextStoreCheckpoint = advanceCheckpoint(existingCheckpoint, newMessages, now);
+    const nextStoreCheckpoint = advanceCheckpoint(existingCheckpoint, newMessages, now, {
+      refreshHeartbeat: degradedReason === null && existingCheckpoint.after !== null,
+    });
     if (!areStoreCheckpointsEqual(existingCheckpoint, nextStoreCheckpoint)) {
       nextCheckpoint.stores[store.key] = nextStoreCheckpoint;
       checkpointDirty = true;
@@ -344,7 +349,7 @@ export async function writeWacliCollectorCheckpoint(
 export function latestCheckpointSyncAt(checkpoint: WacliCollectorCheckpointState): string | null {
   const entries = Object.values(checkpoint.stores ?? {});
   const timestamps = entries
-    .map((entry) => normalizeTimestamp(entry.after))
+    .map((entry) => normalizeTimestamp(entry.updated_at) ?? normalizeTimestamp(entry.after))
     .filter((value): value is string => Boolean(value));
 
   if (timestamps.length === 0) {
@@ -577,14 +582,32 @@ function filterMessagesAfterCheckpoint(
 function advanceCheckpoint(
   existing: WacliStoreCheckpoint,
   newMessages: CollectedWhatsAppMessage[],
-  now: Date
+  now: Date,
+  options: { refreshHeartbeat?: boolean } = {}
 ): WacliStoreCheckpoint {
+  const nowIso = now.toISOString();
+
   if (newMessages.length === 0) {
-    return existing;
+    if (!options.refreshHeartbeat || !existing.after) {
+      return existing;
+    }
+
+    if (existing.updated_at === nowIso) {
+      return existing;
+    }
+
+    return {
+      ...existing,
+      updated_at: nowIso,
+    };
   }
 
   const sorted = [...newMessages].sort(sortMessagesByTimestampThenIdThenStore);
   const after = sorted[sorted.length - 1]?.Timestamp ?? existing.after;
+  if (!after) {
+    return existing;
+  }
+
   const idsAtAfter = sorted
     .filter((message) => message.Timestamp === after)
     .map((message) => message.MsgID)
@@ -593,7 +616,7 @@ function advanceCheckpoint(
   return {
     after,
     message_ids_at_after: idsAtAfter,
-    updated_at: now.toISOString(),
+    updated_at: nowIso,
   };
 }
 

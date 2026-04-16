@@ -286,4 +286,23 @@ describe('MorningBriefGenerator', () => {
     expect(brief).toContain('No active commitments');
     expect(brief).not.toContain('## Overdue items');
   });
+
+  test('reports last sync unknown when no freshness is provided, even if action items exist', async () => {
+    const { db: localDb, generator } = await createGenerator();
+
+    await insertItem(localDb, {
+      title: 'Existing item without checkpoint freshness',
+      source_message_id: 'brief-unknown-001',
+      created_at: '2026-04-10T12:00:00.000Z',
+      updated_at: '2026-04-16T10:00:00.000Z',
+    });
+
+    const brief = await generator.generateMorningBrief({
+      now: new Date('2026-04-16T12:00:00.000Z'),
+    });
+
+    expect(brief).toContain('wacli freshness: last sync unknown');
+    expect(brief).not.toContain('wacli freshness: last sync 2026-04-10T12:00:00.000Z');
+    expect(brief).toContain('WARNING: ingestion degraded (>24h since last wacli sync).');
+  });
 });
