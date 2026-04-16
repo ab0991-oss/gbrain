@@ -110,7 +110,8 @@ parity), `test/cli.test.ts` (CLI structure), `test/config.test.ts` (config redac
 `test/action-brain/brief.test.ts` (brief generation, scoring, dedup, overdue detection),
 `test/action-brain/collector.test.ts` (wacli file reading, checkpoint store, dedup, freshness filtering),
 `test/action-brain/ingest-runner.test.ts` (preflight checks, staleness gate, collect/extract/store pipeline, structured JSON output),
-`test/action-brain/operations.test.ts` (all 6 ops, ingest trust boundary, batch fallbacks, action_ingest_auto pipeline).
+`test/action-brain/operations.test.ts` (all 6 ops, ingest trust boundary, batch fallbacks, action_ingest_auto pipeline),
+`test/action-brain/e2e-live-validation-metrics.test.ts` (matchCommitment unit tests: alias matching, type compatibility, action substring matching).
 
 E2E tests (`test/e2e/`): Run against real Postgres+pgvector. Require `DATABASE_URL`.
 - `bun run test:e2e` runs Tier 1 (mechanical, all operations, no API keys)
