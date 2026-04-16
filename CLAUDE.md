@@ -61,6 +61,12 @@ markdown files (tool-agnostic, work with both CLI and plugin contexts).
 - `src/commands/lint.ts` — Page quality linter (catches LLM artifacts, placeholder dates)
 - `src/commands/report.ts` — Structured report saver (audit trail for maintenance/enrichment)
 - `openclaw.plugin.json` — ClawHub bundle plugin manifest
+- `src/action-brain/types.ts` — Action Brain shared types (ActionItem, CommitmentBatch, ExtractionResult)
+- `src/action-brain/action-schema.ts` — PGLite DDL + idempotent schema init for action_items / action_history tables
+- `src/action-brain/action-engine.ts` — Storage layer: CRUD, priority scoring (urgency × confidence × recency), PGLite lifecycle
+- `src/action-brain/extractor.ts` — LLM commitment extraction (two-tier Haiku→Sonnet), XML delimiter defense, stable source IDs
+- `src/action-brain/brief.ts` — Morning priority brief generator: ranked action items, overdue detection, deduplication
+- `src/action-brain/operations.ts` — 5 Action Brain operations (action_list, action_brief, action_resolve, action_mark_fp, action_ingest)
 
 ## Commands
 
@@ -72,7 +78,7 @@ Key commands added in v0.7:
 
 ## Testing
 
-`bun test` runs all tests (28 unit test files + 5 E2E test files). Unit tests run
+`bun test` runs all tests (33 unit test files + 5 E2E test files). Unit tests run
 without a database. E2E tests skip gracefully when `DATABASE_URL` is not set.
 
 Unit tests: `test/markdown.test.ts` (frontmatter parsing), `test/chunkers/recursive.test.ts`
@@ -95,7 +101,12 @@ parity), `test/cli.test.ts` (CLI structure), `test/config.test.ts` (config redac
 `test/search.test.ts` (RRF normalization, compiled truth boost, cosine similarity, dedup key),
 `test/dedup.test.ts` (source-aware dedup, compiled truth guarantee, layer interactions),
 `test/intent.test.ts` (query intent classification: entity/temporal/event/general),
-`test/eval.test.ts` (retrieval metrics: precisionAtK, recallAtK, mrr, ndcgAtK, parseQrels).
+`test/eval.test.ts` (retrieval metrics: precisionAtK, recallAtK, mrr, ndcgAtK, parseQrels),
+`test/action-brain/action-schema.test.ts` (Action Brain DDL + idempotent init),
+`test/action-brain/action-engine.test.ts` (CRUD, scoring, PGLite lifecycle),
+`test/action-brain/extractor.test.ts` (extraction, source ID stability, injection defense, timestamp bounds),
+`test/action-brain/brief.test.ts` (brief generation, scoring, dedup, overdue detection),
+`test/action-brain/operations.test.ts` (all 5 ops, ingest trust boundary, batch fallbacks).
 
 E2E tests (`test/e2e/`): Run against real Postgres+pgvector. Require `DATABASE_URL`.
 - `bun run test:e2e` runs Tier 1 (mechanical, all operations, no API keys)
