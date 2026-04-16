@@ -644,7 +644,7 @@ Subcommands:
   resolve <id>
   mark-fp <id>
   ingest [--messages-json <json>] [--model <model>] [--timeout-ms <ms>]
-  run [--checkpoint-path <path>] [--stale-after-hours <hours>] [--wacli-limit <n>]
+  run [--checkpoint-path <path>] [--stale-after-hours <hours>] [--wacli-limit <n>] [--fail-on-degraded]
 `);
 }
 

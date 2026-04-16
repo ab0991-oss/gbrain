@@ -63,6 +63,12 @@ describe('Action Brain operation integration', () => {
     expect(names.has('action_ingest_auto')).toBe(true);
   });
 
+  test('action_ingest_auto exposes fail_on_degraded scheduler guard parameter', () => {
+    const op = getActionOperation('action_ingest_auto');
+    expect(op.params.fail_on_degraded).toBeDefined();
+    expect(op.params.fail_on_degraded?.type).toBe('boolean');
+  });
+
   test('#23 mergeOperationSets fails fast on operation and CLI collisions', () => {
     expect(() =>
       mergeOperationSets([makeOperation('alpha', 'alpha-cmd')], [makeOperation('alpha', 'beta-cmd')])
@@ -99,6 +105,7 @@ describe('Action Brain operation integration', () => {
 
     expect(exitCode).toBe(0);
     expect(stdout).toContain('Usage: gbrain action run');
+    expect(stdout).toContain('--fail-on-degraded');
   });
 
   test('action_ingest stays idempotent when commitments arrive in different output order', async () => {

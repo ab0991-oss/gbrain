@@ -51,6 +51,7 @@ export interface RunActionIngestOptions {
   db: ActionDb;
   now?: Date;
   minConfidence?: number;
+  failOnDegraded?: boolean;
   actor?: string;
   model?: string;
   timeoutMs?: number;
@@ -69,6 +70,7 @@ export async function runActionIngest(options: RunActionIngestOptions): Promise<
   const collect = options.collector ?? collectWacliMessages;
   const extract = options.extractor ?? extractCommitments;
   const minConfidence = normalizeConfidenceThreshold(options.minConfidence);
+  const failOnDegraded = options.failOnDegraded ?? false;
   const actor = asOptionalNonEmptyString(options.actor) ?? 'extractor';
 
   await initActionSchema({ exec: options.db.exec.bind(options.db) });
@@ -115,6 +117,11 @@ export async function runActionIngest(options: RunActionIngestOptions): Promise<
 
   if (health.status === 'failed') {
     summary.failure = toFailure('health', health.alerts[0] ?? 'wacli health check failed');
+    return summary;
+  }
+
+  if (health.status === 'degraded' && failOnDegraded) {
+    summary.failure = toFailure('health', health.alerts[0] ?? 'wacli health check degraded');
     return summary;
   }
 
