@@ -37,6 +37,13 @@ src/
     embedding.ts          OpenAI embedding service
   mcp/
     server.ts             MCP stdio server (generated from operations)
+  action-brain/           Action Brain extension (commitment/obligation tracking)
+    types.ts              Shared types (ActionItem, CommitmentBatch, ExtractionResult)
+    action-schema.ts      PGLite DDL + schema init for action_items/action_history tables
+    action-engine.ts      Storage layer: CRUD, priority scoring, PGLite lifecycle
+    extractor.ts          LLM commitment extraction with prompt injection defense
+    brief.ts              Morning priority brief generator (ranked + deduped)
+    operations.ts         5 registered ops: action_list/brief/resolve/mark-fp/ingest
   schema.sql              Postgres DDL
 skills/                   Fat markdown skills for AI agents
 test/                     Unit tests (bun test, no DB required)
