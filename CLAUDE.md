@@ -282,6 +282,18 @@ Never merge external PRs directly into master. Instead, use the "fix wave" workf
 - Never auto-merge PRs that remove YC references or "neutralize" the founder perspective.
 - Preserve contributor attribution in commit messages.
 
+## Action Brain
+
+Action Brain is a GBrain extension for commitment/obligation tracking. Design doc:
+`docs/designs/action-brain/DESIGN.md`
+
+Key decisions:
+- Extension, not fork. Separate tables in the same PGLite database.
+- Action items are structured lifecycle objects (like issues/tickets), not wiki pages.
+- Pipeline: WhatsApp ingest → LLM extraction → reconciliation → priority scoring → brief generation.
+- Stack: PGLite, Bun, TypeScript (same as GBrain core).
+- MVP 0.1: extraction + storage + morning brief. Prove accuracy before building infrastructure.
+
 ## Skill routing
 
 When the user's request matches an available skill, ALWAYS invoke it using the Skill
