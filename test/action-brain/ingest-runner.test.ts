@@ -127,7 +127,8 @@ describe('runActionIngest', () => {
       const root = createTempDir();
       const checkpointPath = join(root, 'wacli-checkpoint.json');
       const messages = [message('m3', '2026-04-16T09:00:00.000Z', 'Joe to send vessel update')];
-      const extractorOutput = [commitment('Joe', 'Send vessel update', 'm3', 0.9)];
+      const firstExtractorOutput = [commitment('Joe', 'Send vessel update', 'm3', 0.9)];
+      const secondExtractorOutput = [commitment('Joe', 'Send vessel update before noon', 'm3', 0.9, 'follow_up')];
 
       const collector = async (_options: CollectWacliMessagesOptions): Promise<WacliCollectionResult> => ({
         collectedAt: '2026-04-16T09:05:00.000Z',
@@ -166,13 +167,13 @@ describe('runActionIngest', () => {
         db,
         collectorOptions: { checkpointPath },
         collector,
-        extractor: async () => extractorOutput,
+        extractor: async () => firstExtractorOutput,
       });
       const secondRun = await runActionIngest({
         db,
         collectorOptions: { checkpointPath },
         collector,
-        extractor: async () => extractorOutput,
+        extractor: async () => secondExtractorOutput,
       });
 
       expect(firstRun.success).toBe(true);
@@ -446,14 +447,20 @@ function message(id: string, timestamp: string, text: string): CollectedWhatsApp
   };
 }
 
-function commitment(who: string, owesWhat: string, sourceMessageId: string, confidence: number): StructuredCommitment {
+function commitment(
+  who: string,
+  owesWhat: string,
+  sourceMessageId: string,
+  confidence: number,
+  type: StructuredCommitment['type'] = 'commitment'
+): StructuredCommitment {
   return {
     who,
     owes_what: owesWhat,
     to_whom: 'Abhi',
     by_when: null,
     confidence,
-    type: 'commitment',
+    type,
     source_message_id: sourceMessageId,
   };
 }

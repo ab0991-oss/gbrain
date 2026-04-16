@@ -149,12 +149,14 @@ export async function runActionIngest(options: RunActionIngestOptions): Promise<
   });
 
   const engine = new ActionEngine(options.db);
+  const sourceOrdinalByMessageId = new Map<string, number>();
   try {
     for (const commitment of commitments) {
       const sourceMessage = resolveSourceMessage(collection.messages, commitment);
       const sourceMessageId = buildCommitmentSourceId(
         resolveSourceMessageId(collection.messages, commitment, sourceMessage),
-        commitment
+        commitment,
+        sourceOrdinalByMessageId
       );
 
       const result = await engine.createItemWithResult(
@@ -238,10 +240,21 @@ function resolveSourceMessageId(
   return null;
 }
 
-function buildCommitmentSourceId(sourceMessageId: string | null, commitment: StructuredCommitment): string {
-  const baseMsgId = asOptionalNonEmptyString(sourceMessageId) ?? 'batch';
+function buildCommitmentSourceId(
+  sourceMessageId: string | null,
+  commitment: StructuredCommitment,
+  sourceOrdinalByMessageId: Map<string, number>
+): string {
+  const baseMsgId = asOptionalNonEmptyString(sourceMessageId);
+  if (baseMsgId) {
+    const nextOrdinal = sourceOrdinalByMessageId.get(baseMsgId) ?? 0;
+    sourceOrdinalByMessageId.set(baseMsgId, nextOrdinal + 1);
+    return `${baseMsgId}:ab:${nextOrdinal}`;
+  }
+
+  const batchKey = 'batch';
   const seed = [
-    baseMsgId,
+    batchKey,
     normalizeCommitmentField(commitment.who),
     normalizeCommitmentField(commitment.owes_what),
     normalizeCommitmentField(commitment.to_whom),
@@ -249,7 +262,7 @@ function buildCommitmentSourceId(sourceMessageId: string | null, commitment: Str
     commitment.type,
   ].join('|');
   const digest = createHash('sha256').update(seed).digest('hex').slice(0, 16);
-  return `${baseMsgId}:ab:${digest}`;
+  return `${batchKey}:ab:${digest}`;
 }
 
 function normalizeCommitmentField(value: string | null | undefined): string {

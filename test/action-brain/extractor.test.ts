@@ -239,6 +239,36 @@ describe('extractCommitments', () => {
       },
     ]);
   });
+
+  test('retries transient extraction errors and returns recovered commitments', async () => {
+    let attempts = 0;
+    const fakeClient = new FakeAnthropicClient(() => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new Error('529 overloaded');
+      }
+
+      return toolResponse([
+        {
+          who: 'Joe',
+          owes_what: 'Send rail docs',
+          to_whom: 'Abhi',
+          by_when: null,
+          confidence: 0.9,
+          type: 'commitment',
+          source_message_id: 'msg-006',
+        },
+      ]);
+    });
+
+    const output = await extractCommitments([message('msg-006', 'Joe will send rail docs today.')], {
+      client: fakeClient,
+    });
+
+    expect(output.length).toBe(1);
+    expect(output[0]?.owes_what).toBe('Send rail docs');
+    expect(fakeClient.calls.length).toBe(2);
+  });
 });
 
 describe('runCommitmentQualityGate', () => {
