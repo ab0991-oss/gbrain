@@ -191,6 +191,8 @@ export async function runActionIngest(options: RunActionIngestOptions): Promise<
     return summary;
   }
 
+  // Only write the checkpoint file if at least one store advanced its cursor. Avoids redundant
+  // writes on empty incremental polls and keeps the checkpoint file as a reliable "something changed" signal.
   const shouldPersistCheckpoint = collection.stores.some((store) => store.checkpointBefore !== store.checkpointAfter);
   if (!shouldPersistCheckpoint) {
     summary.success = true;
@@ -219,6 +221,9 @@ function resolveSourceMessage(messages: WhatsAppMessage[], commitment: Structure
     if (matched) {
       return matched;
     }
+    // LLM supplied a source_message_id that doesn't match any message in the batch. For single-message
+    // batches, fall through to the default below — the commitment can only originate from the one message.
+    // For multi-message batches this returns null, which the caller treats as an unattributed commitment.
   }
 
   return messages.length === 1 ? messages[0] : null;
@@ -281,6 +286,9 @@ function parseOptionalDate(value: string | null | undefined, field: string): Dat
   if (!normalized) return null;
   const parsed = new Date(normalized);
   if (Number.isNaN(parsed.getTime())) {
+    // Intentionally throws: an unparseable date from the LLM is a store-stage failure that prevents
+    // the checkpoint from advancing past messages we couldn't fully process. This surfaces the issue
+    // rather than silently dropping due_at and marking the run as successful.
     throw new Error(`Invalid ${field}: ${normalized}`);
   }
   return parsed;
