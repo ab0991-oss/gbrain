@@ -64,7 +64,7 @@ markdown files (tool-agnostic, work with both CLI and plugin contexts).
 - `src/action-brain/types.ts` — Action Brain shared types (ActionItem, CommitmentBatch, ExtractionResult)
 - `src/action-brain/action-schema.ts` — PGLite DDL + idempotent schema init for action_items / action_history tables
 - `src/action-brain/action-engine.ts` — Storage layer: CRUD, priority scoring (urgency × confidence × recency), PGLite lifecycle; `createItemWithResult()` returns idempotency signal (created vs skipped)
-- `src/action-brain/extractor.ts` — LLM commitment extraction (Sonnet default; quality gate uses Haiku→Sonnet escalation), XML delimiter defense, stable source IDs, owner context injection
+- `src/action-brain/extractor.ts` — LLM commitment extraction (Sonnet default; quality gate uses Haiku→Sonnet escalation), `stabilizeCommitments()` for message-grounded actor normalization, XML delimiter defense, stable source IDs, owner context injection
 - `src/action-brain/brief.ts` — Morning priority brief generator: ranked action items, overdue detection, deduplication
 - `src/action-brain/collector.ts` — Wacli message collector: reads WhatsApp export files, deduplicates by message ID, checkpoint-aware (skips already-processed messages)
 - `src/action-brain/ingest-runner.ts` — Auto-ingest orchestrator: preflight checks, staleness gate, collect → extract → store pipeline; cron-ready, returns structured JSON
@@ -106,7 +106,7 @@ parity), `test/cli.test.ts` (CLI structure), `test/config.test.ts` (config redac
 `test/eval.test.ts` (retrieval metrics: precisionAtK, recallAtK, mrr, ndcgAtK, parseQrels),
 `test/action-brain/action-schema.test.ts` (Action Brain DDL + idempotent init),
 `test/action-brain/action-engine.test.ts` (CRUD, scoring, PGLite lifecycle),
-`test/action-brain/extractor.test.ts` (extraction, source ID stability, injection defense, timestamp bounds, owner context),
+`test/action-brain/extractor.test.ts` (extraction, stabilizeCommitments actor normalization, source ID stability, injection defense, timestamp bounds, owner context),
 `test/action-brain/brief.test.ts` (brief generation, scoring, dedup, overdue detection),
 `test/action-brain/collector.test.ts` (wacli file reading, checkpoint store, dedup, freshness filtering),
 `test/action-brain/ingest-runner.test.ts` (preflight checks, staleness gate, collect/extract/store pipeline, structured JSON output),

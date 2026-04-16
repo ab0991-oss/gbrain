@@ -41,9 +41,11 @@ src/
     types.ts              Shared types (ActionItem, CommitmentBatch, ExtractionResult)
     action-schema.ts      PGLite DDL + schema init for action_items/action_history tables
     action-engine.ts      Storage layer: CRUD, priority scoring, PGLite lifecycle
-    extractor.ts          LLM commitment extraction with prompt injection defense
+    extractor.ts          LLM commitment extraction (Sonnet default), stabilization, injection defense
+    collector.ts          Wacli message collector: reads WhatsApp exports, checkpoint-aware dedup
+    ingest-runner.ts      Auto-ingest orchestrator: collect → extract → store pipeline, cron-ready
     brief.ts              Morning priority brief generator (ranked + deduped)
-    operations.ts         5 registered ops: action_list/brief/resolve/mark-fp/ingest
+    operations.ts         6 registered ops: action_list/brief/resolve/mark-fp/ingest/ingest-auto
   schema.sql              Postgres DDL
 skills/                   Fat markdown skills for AI agents
 test/                     Unit tests (bun test, no DB required)
