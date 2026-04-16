@@ -13,11 +13,15 @@ All notable changes to GBrain will be documented in this file.
 - **Extraction retries on transient LLM errors.** `extractCommitments()` now retries on overload, rate limit, and timeout errors (configurable, default 1 retry) so a momentary API hiccup doesn't drop commitments from your pipeline.
 - **Commitment actor normalization.** `stabilizeCommitments()` grounds LLM output against the actual message context — if the LLM assigns a commitment to the wrong person, the pipeline corrects it using message-level "X will..." pattern matching. Fewer ghost obligations attributed to the wrong contact.
 
+- **`gbrain action run` exits non-zero when ingest fails.** Schedulers and cron jobs can now reliably detect degraded or unhealthy runs by exit code — no JSON parsing required. A healthy run exits 0 and still emits the full structured summary. A failed/degraded run exits 1, also with full JSON output, so you get both machine-readable failure detection and human-readable diagnosis.
+
 ### Fixed
 
 - **Replay now produces stable, deduplicated source IDs.** When the same WhatsApp message is ingested twice — even if the LLM extracts slightly different wording or commitment type — the second run sees the existing item and skips it cleanly. Source IDs are now ordinal-based per message (`msg-id:ab:0`, `msg-id:ab:1`) rather than content-hashed, so dedup is reliable regardless of LLM drift between runs.
 - **`action_ingest` reports accurate created/skipped counts.** The operation now correctly reports how many items were freshly created vs. already existed, using the idempotency signal from the storage layer.
 - **Brief freshness is now always current.** The wacli checkpoint now records a heartbeat timestamp on every successful poll — even when no new messages arrive. This means `gbrain action brief` no longer shows a stale freshness warning when wacli is healthy but simply has no new traffic.
+- **Source IDs are now isolated per wacli store.** Two stores that happen to share the same raw message ID can no longer collide in the dedup index — each store gets its own namespace. Prevents cross-store duplicate suppression when you add a second wacli source.
+- **Ambiguous bare source IDs now fail closed.** When a commitment's source ID can't be unambiguously resolved to one message (e.g., a bare ID that exists in multiple stores), the extractor rejects the batch instead of silently attributing it to the wrong message. Prevents ghost commitments from being stored with incorrect provenance.
 
 ## [0.10.1] - 2026-04-16
 
