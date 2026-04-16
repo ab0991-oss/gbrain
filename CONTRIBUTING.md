@@ -49,6 +49,7 @@ src/
   schema.sql              Postgres DDL
 skills/                   Fat markdown skills for AI agents
 test/                     Unit tests (bun test, no DB required)
+test/fixtures/            Shared test fixtures (mock module preloads for subprocess-level tests)
 test/e2e/                 E2E tests (requires DATABASE_URL, real Postgres+pgvector)
   fixtures/               Miniature realistic brain corpus (16 files)
   helpers.ts              DB lifecycle, fixture import, timing

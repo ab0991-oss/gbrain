@@ -12,7 +12,6 @@ All notable changes to GBrain will be documented in this file.
 - **Wacli health checks before every ingest run.** The auto-ingest runner now verifies wacli's health state (`healthy` / `degraded` / `failed`) before touching your messages. A stale store (>24h no update) is reported as `degraded`; a disconnected store is `failed`. Scheduled runs can fail fast on degraded health with `--fail-on-degraded`, so your cron doesn't silently ingest stale data.
 - **Extraction retries on transient LLM errors.** `extractCommitments()` now retries on overload, rate limit, and timeout errors (configurable, default 1 retry) so a momentary API hiccup doesn't drop commitments from your pipeline.
 - **Commitment actor normalization.** `stabilizeCommitments()` grounds LLM output against the actual message context — if the LLM assigns a commitment to the wrong person, the pipeline corrects it using message-level "X will..." pattern matching. Fewer ghost obligations attributed to the wrong contact.
-
 - **`gbrain action run` exits non-zero when ingest fails.** Schedulers and cron jobs can now reliably detect degraded or unhealthy runs by exit code — no JSON parsing required. A healthy run exits 0 and still emits the full structured summary. A failed/degraded run exits 1, also with full JSON output, so you get both machine-readable failure detection and human-readable diagnosis.
 
 ### Fixed

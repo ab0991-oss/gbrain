@@ -113,7 +113,9 @@ parity), `test/cli.test.ts` (CLI structure), `test/config.test.ts` (config redac
 `test/action-brain/operations.test.ts` (all 6 ops, ingest trust boundary, batch fallbacks, action_ingest_auto pipeline),
 `test/action-brain/e2e-live-validation-metrics.test.ts` (matchCommitment unit tests: alias matching, type compatibility, action substring matching),
 `test/embed.test.ts` (embedding batch + retry logic), `test/import-walker.test.ts` (file walker + gitignore filtering),
-`test/pglite-lock.test.ts` (PGLite lock/concurrency behavior), `test/search-limit.test.ts` (search result count limits).
+`test/pglite-lock.test.ts` (PGLite lock/concurrency behavior), `test/search-limit.test.ts` (search result count limits),
+`test/cli-action-run.test.ts` (process-level exit-code tests for `gbrain action run` via Bun subprocess + `--preload` fixture),
+`test/fixtures/cli-action-run.preload.ts` (mock module preload for isolated CLI exit-code testing).
 
 E2E tests (`test/e2e/`): Run against real Postgres+pgvector. Require `DATABASE_URL`.
 - `bun run test:e2e` runs Tier 1 (mechanical, all operations, no API keys)
