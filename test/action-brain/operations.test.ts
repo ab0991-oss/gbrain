@@ -314,6 +314,69 @@ describe('Action Brain operation integration', () => {
     });
   });
 
+  test('action_ingest keeps store-qualified source_message_id isolated when stores share the same MsgID', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const actionIngest = getActionOperation('action_ingest');
+      const messages = [
+        {
+          ChatName: 'Personal Ops',
+          SenderName: 'Joe',
+          Timestamp: '2026-04-16T08:00:00.000Z',
+          Text: 'Send personal docs',
+          MsgID: 'shared-msg',
+          store_key: 'personal',
+          store_path: '/stores/personal',
+        },
+        {
+          ChatName: 'Business Ops',
+          SenderName: 'Mukesh',
+          Timestamp: '2026-04-16T08:05:00.000Z',
+          Text: 'Send business docs',
+          MsgID: 'shared-msg',
+          store_key: 'business',
+          store_path: '/stores/business',
+        },
+      ];
+      const commitments = [
+        {
+          who: 'Joe',
+          owes_what: 'Send personal docs',
+          to_whom: 'Abhi',
+          by_when: null,
+          confidence: 0.9,
+          type: 'commitment',
+          source_message_id: 'personal::shared-msg',
+        },
+        {
+          who: 'Mukesh',
+          owes_what: 'Send business docs',
+          to_whom: 'Abhi',
+          by_when: null,
+          confidence: 0.9,
+          type: 'commitment',
+          source_message_id: 'business::shared-msg',
+        },
+      ];
+
+      await actionIngest.handler(ctx, { messages, commitments });
+
+      const db = (engine as unknown as EngineWithDb).db;
+      const rows = await db.query(
+        `SELECT source_message_id, source_thread, source_contact
+         FROM action_items
+         ORDER BY source_message_id`
+      );
+
+      expect(rows.rows.length).toBe(2);
+      expect(rows.rows.map((row) => row.source_message_id)).toEqual([
+        'business::shared-msg:ab:0',
+        'personal::shared-msg:ab:0',
+      ]);
+      expect(rows.rows.map((row) => row.source_thread)).toEqual(['Business Ops', 'Personal Ops']);
+      expect(rows.rows.map((row) => row.source_contact)).toEqual(['Mukesh', 'Joe']);
+    });
+  });
+
   test('action_brief resolves freshness from wacli checkpoint when last_sync_at is omitted', async () => {
     await withActionContext(async (ctx) => {
       const actionBrief = getActionOperation('action_brief');

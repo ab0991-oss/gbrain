@@ -477,6 +477,114 @@ describe('runActionIngest', () => {
       expect(checkpoint.stores.personal?.updated_at).toBe('2026-04-16T12:00:00.000Z');
     });
   });
+
+  test('keeps store-qualified source ids isolated when collector messages share the same MsgID across stores', async () => {
+    await withDb(async (db) => {
+      const root = createTempDir();
+      const checkpointPath = join(root, 'wacli-checkpoint.json');
+      const messages = [
+        {
+          ...message('shared-msg', '2026-04-16T13:00:00.000Z', 'Send personal docs'),
+          ChatName: 'Personal Ops',
+          SenderName: 'Joe',
+          store_key: 'personal',
+          store_path: '/stores/personal',
+        },
+        {
+          ...message('shared-msg', '2026-04-16T13:05:00.000Z', 'Send business docs'),
+          ChatName: 'Business Ops',
+          SenderName: 'Mukesh',
+          store_key: 'business',
+          store_path: '/stores/business',
+          SenderJID: 'mukesh@jid',
+        },
+      ];
+
+      const summary = await runActionIngest({
+        db,
+        collectorOptions: { checkpointPath },
+        collector: async (_options: CollectWacliMessagesOptions): Promise<WacliCollectionResult> => ({
+          collectedAt: '2026-04-16T13:10:00.000Z',
+          checkpointPath,
+          limit: 200,
+          staleAfterHours: 24,
+          stores: [
+            {
+              storeKey: 'personal',
+              storePath: '/stores/personal',
+              checkpointBefore: null,
+              checkpointAfter: '2026-04-16T13:00:00.000Z',
+              batchSize: 1,
+              lastSyncAt: '2026-04-16T13:00:00.000Z',
+              degraded: false,
+              degradedReason: null,
+              error: null,
+              messages: [messages[0]],
+            },
+            {
+              storeKey: 'business',
+              storePath: '/stores/business',
+              checkpointBefore: null,
+              checkpointAfter: '2026-04-16T13:05:00.000Z',
+              batchSize: 1,
+              lastSyncAt: '2026-04-16T13:05:00.000Z',
+              degraded: false,
+              degradedReason: null,
+              error: null,
+              messages: [messages[1]],
+            },
+          ],
+          messages,
+          degraded: false,
+          checkpoint: {
+            version: 1,
+            stores: {
+              personal: {
+                after: '2026-04-16T13:00:00.000Z',
+                message_ids_at_after: ['shared-msg'],
+                updated_at: '2026-04-16T13:10:00.000Z',
+              },
+              business: {
+                after: '2026-04-16T13:05:00.000Z',
+                message_ids_at_after: ['shared-msg'],
+                updated_at: '2026-04-16T13:10:00.000Z',
+              },
+            },
+          },
+        }),
+        extractor: async () => [
+          commitment('Joe', 'Send personal docs', 'personal::shared-msg', 0.9),
+          commitment('Mukesh', 'Send business docs', 'business::shared-msg', 0.9),
+        ],
+      });
+
+      expect(summary.success).toBe(true);
+      expect(summary.commitmentsCreated).toBe(2);
+
+      const rows = await db.query<{
+        source_message_id: string;
+        source_thread: string;
+        source_contact: string;
+      }>(
+        `SELECT source_message_id, source_thread, source_contact
+         FROM action_items
+         ORDER BY source_message_id`
+      );
+
+      expect(rows.rows).toEqual([
+        {
+          source_message_id: 'business::shared-msg:ab:0',
+          source_thread: 'Business Ops',
+          source_contact: 'Mukesh',
+        },
+        {
+          source_message_id: 'personal::shared-msg:ab:0',
+          source_thread: 'Personal Ops',
+          source_contact: 'Joe',
+        },
+      ]);
+    });
+  });
 });
 
 async function withDb<T>(fn: (db: ActionDb) => Promise<T>): Promise<T> {
