@@ -17,6 +17,7 @@ All notable changes to GBrain will be documented in this file.
 
 - **Replay now produces stable, deduplicated source IDs.** When the same WhatsApp message is ingested twice — even if the LLM extracts slightly different wording or commitment type — the second run sees the existing item and skips it cleanly. Source IDs are now ordinal-based per message (`msg-id:ab:0`, `msg-id:ab:1`) rather than content-hashed, so dedup is reliable regardless of LLM drift between runs.
 - **`action_ingest` reports accurate created/skipped counts.** The operation now correctly reports how many items were freshly created vs. already existed, using the idempotency signal from the storage layer.
+- **Brief freshness is now always current.** The wacli checkpoint now records a heartbeat timestamp on every successful poll — even when no new messages arrive. This means `gbrain action brief` no longer shows a stale freshness warning when wacli is healthy but simply has no new traffic.
 
 ## [0.10.1] - 2026-04-16
 
