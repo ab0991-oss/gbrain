@@ -585,6 +585,96 @@ describe('runActionIngest', () => {
       ]);
     });
   });
+
+  test('fails closed when ambiguous bare source_message_id values span multiple stores', async () => {
+    await withDb(async (db) => {
+      const root = createTempDir();
+      const checkpointPath = join(root, 'wacli-checkpoint.json');
+      const messages = [
+        {
+          ...message('shared-msg', '2026-04-16T13:00:00.000Z', 'Send docs'),
+          ChatName: 'Personal Ops',
+          SenderName: 'Joe',
+          store_key: 'personal',
+          store_path: '/stores/personal',
+        },
+        {
+          ...message('shared-msg', '2026-04-16T13:05:00.000Z', 'Send docs'),
+          ChatName: 'Business Ops',
+          SenderName: 'Joe',
+          store_key: 'business',
+          store_path: '/stores/business',
+        },
+      ];
+
+      const summary = await runActionIngest({
+        db,
+        collectorOptions: { checkpointPath },
+        collector: async (_options: CollectWacliMessagesOptions): Promise<WacliCollectionResult> => ({
+          collectedAt: '2026-04-16T13:10:00.000Z',
+          checkpointPath,
+          limit: 200,
+          staleAfterHours: 24,
+          stores: [
+            {
+              storeKey: 'personal',
+              storePath: '/stores/personal',
+              checkpointBefore: null,
+              checkpointAfter: '2026-04-16T13:00:00.000Z',
+              batchSize: 1,
+              lastSyncAt: '2026-04-16T13:00:00.000Z',
+              degraded: false,
+              degradedReason: null,
+              error: null,
+              messages: [messages[0]],
+            },
+            {
+              storeKey: 'business',
+              storePath: '/stores/business',
+              checkpointBefore: null,
+              checkpointAfter: '2026-04-16T13:05:00.000Z',
+              batchSize: 1,
+              lastSyncAt: '2026-04-16T13:05:00.000Z',
+              degraded: false,
+              degradedReason: null,
+              error: null,
+              messages: [messages[1]],
+            },
+          ],
+          messages,
+          degraded: false,
+          checkpoint: {
+            version: 1,
+            stores: {
+              personal: {
+                after: '2026-04-16T13:00:00.000Z',
+                message_ids_at_after: ['shared-msg'],
+                updated_at: '2026-04-16T13:10:00.000Z',
+              },
+              business: {
+                after: '2026-04-16T13:05:00.000Z',
+                message_ids_at_after: ['shared-msg'],
+                updated_at: '2026-04-16T13:10:00.000Z',
+              },
+            },
+          },
+        }),
+        extractor: async () => [
+          commitment('Joe', 'Send docs', 'shared-msg', 0.9),
+          commitment('Joe', 'Send docs', 'shared-msg', 0.9),
+        ],
+      });
+
+      expect(summary.success).toBe(false);
+      expect(summary.failure).toEqual({
+        stage: 'store',
+        message: 'Ambiguous source_message_id: shared-msg matches multiple store-qualified messages in this batch.',
+      });
+
+      const rows = await db.query(`SELECT source_message_id FROM action_items`);
+      expect(rows.rows).toEqual([]);
+    });
+  });
 });
 
 async function withDb<T>(fn: (db: ActionDb) => Promise<T>): Promise<T> {

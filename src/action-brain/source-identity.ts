@@ -66,7 +66,32 @@ export function resolveSourceMessageId(
     return asOptionalNonEmptyString(commitment.source_message_id);
   }
 
+  const explicitSourceMessageId = asOptionalNonEmptyString(commitment.source_message_id);
+  if (!explicitSourceMessageId) {
+    return null;
+  }
+
+  const bareMatches = messages.filter((entry) => getBareMessageId(buildSourceMessageRef(entry)) === explicitSourceMessageId);
+  if (bareMatches.length === 1) {
+    return buildSourceMessageRef(bareMatches[0]);
+  }
+
+  if (bareMatches.length > 1) {
+    throw new Error(
+      `Ambiguous source_message_id: ${explicitSourceMessageId} matches multiple store-qualified messages in this batch.`
+    );
+  }
+
   return null;
+}
+
+function getBareMessageId(sourceMessageId: string): string {
+  const delimiterIndex = sourceMessageId.indexOf(STORE_MESSAGE_ID_DELIMITER);
+  if (delimiterIndex === -1) {
+    return sourceMessageId;
+  }
+
+  return sourceMessageId.slice(delimiterIndex + STORE_MESSAGE_ID_DELIMITER.length);
 }
 
 function asOptionalNonEmptyString(value: unknown): string | null {
