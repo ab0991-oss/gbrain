@@ -2,6 +2,14 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.10.2] - 2026-04-16
+
+### Added
+
+- **`gbrain action run` — cron-ready auto-ingest pipeline.** One command reads new WhatsApp messages from the wacli store, extracts commitments with the LLM extractor, and stores them in Action Brain. Checkpoint-aware: skips already-processed messages. Staleness gate: bails out if wacli data is older than `--stale-after-hours` (default 24h). Returns structured JSON with counts and errors — CI/cron-friendly.
+- **Morning brief is now checkpoint-aware.** `gbrain action brief` auto-reads the wacli checkpoint to compute message freshness — no more manually passing `--last-sync-at`. Pass `--checkpoint-path` to override the default location.
+- **Action item creation now returns idempotency signal.** `createItemWithResult()` tells callers whether an item was freshly inserted or already existed — so the ingest pipeline can report accurate created/skipped counts without extra DB queries.
+
 ## [0.10.1] - 2026-04-16
 
 ### Added

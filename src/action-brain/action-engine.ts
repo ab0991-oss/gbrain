@@ -54,6 +54,11 @@ export interface ActionMutationOptions {
   metadata?: Record<string, unknown>;
 }
 
+export interface CreateActionItemResult {
+  item: ActionItem;
+  created: boolean;
+}
+
 export interface ListActionItemsFilters {
   status?: ActionStatus;
   owner?: string;
@@ -80,6 +85,14 @@ export class ActionEngine {
   constructor(private readonly db: ActionDb) {}
 
   async createItem(input: CreateActionItemInput, options: ActionMutationOptions = {}): Promise<ActionItem> {
+    const result = await this.createItemWithResult(input, options);
+    return result.item;
+  }
+
+  async createItemWithResult(
+    input: CreateActionItemInput,
+    options: ActionMutationOptions = {}
+  ): Promise<CreateActionItemResult> {
     return this.withTransaction(async () => {
       const result = await this.db.query<ActionInsertRow>(
         `WITH inserted AS (
@@ -142,7 +155,10 @@ export class ActionEngine {
         );
       }
 
-      return mapActionItem(row);
+      return {
+        item: mapActionItem(row),
+        created: toBoolean(row.was_inserted),
+      };
     });
   }
 

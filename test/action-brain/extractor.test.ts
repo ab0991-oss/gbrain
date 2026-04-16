@@ -194,6 +194,19 @@ describe('extractCommitments', () => {
     expect(output).toEqual([]);
   });
 
+  test('rethrows extractor errors when throwOnError=true', async () => {
+    const fakeClient = new FakeAnthropicClient(() => {
+      throw new Error('anthropic unavailable');
+    });
+
+    await expect(
+      extractCommitments([message('msg-004b', 'please send docs')], {
+        client: fakeClient,
+        throwOnError: true,
+      })
+    ).rejects.toThrow('anthropic unavailable');
+  });
+
   test('#5 recovers from text JSON output when tool_use block is absent', async () => {
     const fakeClient = new FakeAnthropicClient(() =>
       textJsonResponse({

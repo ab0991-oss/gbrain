@@ -3,7 +3,13 @@ import type { BrainEngine } from '../core/engine.ts';
 import type { Operation } from '../core/operations.ts';
 import { ActionEngine, ActionItemNotFoundError, ActionTransitionError } from './action-engine.ts';
 import { MorningBriefGenerator } from './brief.ts';
+import {
+  defaultCollectorCheckpointPath,
+  readWacliCollectorLastSyncAt,
+  type WacliStoreConfig,
+} from './collector.ts';
 import { extractCommitments, type StructuredCommitment, type WhatsAppMessage } from './extractor.ts';
+import { runActionIngest } from './ingest-runner.ts';
 import { initActionSchema } from './action-schema.ts';
 
 interface QueryResult<T> {
@@ -13,6 +19,10 @@ interface QueryResult<T> {
 interface QueryableDb {
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<QueryResult<T>>;
   exec?: (sql: string) => Promise<unknown>;
+}
+
+interface ExecQueryableDb extends QueryableDb {
+  exec: (sql: string) => Promise<unknown>;
 }
 
 interface PostgresUnsafeConnection {
@@ -57,6 +67,10 @@ export const actionBrainOperations: Operation[] = [
     params: {
       now: { type: 'string', description: 'Optional clock override (ISO timestamp)' },
       last_sync_at: { type: 'string', description: 'Override wacli freshness timestamp (ISO timestamp)' },
+      checkpoint_path: {
+        type: 'string',
+        description: 'Optional wacli checkpoint path used to auto-resolve freshness when last_sync_at is not provided',
+      },
       timezone_offset_minutes: {
         type: 'number',
         description: 'Timezone offset in minutes east of UTC for due-today classification',
@@ -66,10 +80,18 @@ export const actionBrainOperations: Operation[] = [
     handler: async (ctx, p) => {
       const db = await ensureActionBrainSchema(ctx.engine);
       const generator = new MorningBriefGenerator(db);
+      const explicitLastSyncAt = parseOptionalDate(p.last_sync_at, 'last_sync_at');
+      const checkpointPath = asOptionalNonEmptyString(p.checkpoint_path) ?? defaultCollectorCheckpointPath();
+
+      let inferredLastSyncAt: Date | null = null;
+      if (!explicitLastSyncAt) {
+        const checkpointLastSyncAt = await readWacliCollectorLastSyncAt(checkpointPath);
+        inferredLastSyncAt = parseOptionalDate(checkpointLastSyncAt, 'checkpoint.last_sync_at');
+      }
 
       const brief = await generator.generateMorningBrief({
         now: parseOptionalDate(p.now, 'now') ?? undefined,
-        lastSyncAt: parseOptionalDate(p.last_sync_at, 'last_sync_at'),
+        lastSyncAt: explicitLastSyncAt ?? inferredLastSyncAt,
         timezoneOffsetMinutes: asOptionalNumber(p.timezone_offset_minutes),
       });
 
@@ -222,6 +244,61 @@ export const actionBrainOperations: Operation[] = [
       };
     },
   },
+  {
+    name: 'action_ingest_auto',
+    description: 'Run the wacli collector + extractor auto-ingest pipeline with preflight health checks',
+    params: {
+      now: { type: 'string', description: 'Optional clock override (ISO timestamp)' },
+      min_confidence: { type: 'number', description: 'Drop commitments below this confidence threshold (default: 0.7)' },
+      actor: { type: 'string', description: 'Actor writing created events' },
+      model: { type: 'string', description: 'Anthropic model override' },
+      timeout_ms: { type: 'number', description: 'Extractor timeout in milliseconds' },
+      owner_name: { type: 'string', description: 'Owner name used by extraction prompt grounding' },
+      owner_aliases: { type: 'array', items: { type: 'string' }, description: 'Optional owner alias list' },
+      owner_aliases_json: { type: 'string', description: 'JSON-encoded owner alias list (CLI-friendly)' },
+      checkpoint_path: { type: 'string', description: 'Collector checkpoint path override' },
+      wacli_limit: { type: 'number', description: 'Max messages per wacli list call (default: 200)' },
+      stale_after_hours: {
+        type: 'number',
+        description: 'Mark stores degraded when latest sync is older than this many hours (default: 24)',
+      },
+      personal_store_path: { type: 'string', description: 'Override personal wacli store path' },
+      business_store_path: { type: 'string', description: 'Override business wacli store path' },
+    },
+    mutating: true,
+    cliHints: { name: 'action-run' },
+    handler: async (ctx, p) => {
+      const db = await ensureActionBrainSchema(ctx.engine);
+      const execDb = requireExecQueryableDb(db);
+
+      if (ctx.dryRun) {
+        return { dry_run: true, action: 'action_ingest_auto' };
+      }
+
+      const stores = parseStoreOverrides({
+        personalStorePath: p.personal_store_path,
+        businessStorePath: p.business_store_path,
+      });
+      const ownerAliases = parseStringArrayParam(p.owner_aliases ?? p.owner_aliases_json);
+
+      return runActionIngest({
+        db: execDb,
+        now: parseOptionalDate(p.now, 'now') ?? undefined,
+        minConfidence: asOptionalNumber(p.min_confidence),
+        actor: asOptionalNonEmptyString(p.actor) ?? undefined,
+        model: asOptionalNonEmptyString(p.model) ?? undefined,
+        timeoutMs: asOptionalNumber(p.timeout_ms),
+        ownerName: asOptionalNonEmptyString(p.owner_name) ?? undefined,
+        ownerAliases: ownerAliases.length > 0 ? ownerAliases : undefined,
+        collectorOptions: {
+          checkpointPath: asOptionalNonEmptyString(p.checkpoint_path) ?? undefined,
+          limit: normalizePositiveInteger(p.wacli_limit),
+          staleAfterHours: asOptionalNumber(p.stale_after_hours),
+          stores: stores.length > 0 ? stores : undefined,
+        },
+      });
+    },
+  },
 ];
 
 async function ensureActionBrainSchema(engine: BrainEngine): Promise<QueryableDb> {
@@ -272,6 +349,13 @@ async function resolveActionDb(engine: BrainEngine): Promise<QueryableDb> {
   }
 
   throw new Error('Unsupported engine for Action Brain operations. Expected PGLiteEngine or PostgresEngine.');
+}
+
+function requireExecQueryableDb(db: QueryableDb): ExecQueryableDb {
+  if (typeof db.exec !== 'function') {
+    throw new Error('Action auto-ingest requires an exec-capable database adapter.');
+  }
+  return db as ExecQueryableDb;
 }
 
 function parseMessagesParam(value: unknown): WhatsAppMessage[] {
@@ -358,6 +442,17 @@ function parseJsonArrayInput(value: unknown): unknown[] {
   return [];
 }
 
+function parseStringArrayParam(value: unknown): string[] {
+  const raw = parseJsonArrayInput(value);
+  if (raw.length === 0) {
+    return [];
+  }
+
+  return raw
+    .map((entry) => asOptionalNonEmptyString(entry))
+    .filter((entry): entry is string => Boolean(entry));
+}
+
 function resolveSourceMessage(messages: WhatsAppMessage[], commitment: StructuredCommitment): WhatsAppMessage | null {
   if (messages.length === 0) {
     return null;
@@ -416,6 +511,25 @@ function toActionTitle(owesWhat: string): string {
   return `${text.slice(0, 157)}...`;
 }
 
+function parseStoreOverrides(input: {
+  personalStorePath: unknown;
+  businessStorePath: unknown;
+}): WacliStoreConfig[] {
+  const personalStorePath = asOptionalNonEmptyString(input.personalStorePath);
+  const businessStorePath = asOptionalNonEmptyString(input.businessStorePath);
+  const stores: WacliStoreConfig[] = [];
+
+  if (personalStorePath) {
+    stores.push({ key: 'personal', storePath: personalStorePath });
+  }
+
+  if (businessStorePath && businessStorePath !== personalStorePath) {
+    stores.push({ key: 'business', storePath: businessStorePath });
+  }
+
+  return stores;
+}
+
 function asOptionalNumber(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return value;
@@ -427,6 +541,14 @@ function asOptionalNumber(value: unknown): number | undefined {
     }
   }
   return undefined;
+}
+
+function normalizePositiveInteger(value: unknown): number | undefined {
+  const parsed = asOptionalNumber(value);
+  if (parsed === undefined || !Number.isInteger(parsed) || parsed < 1) {
+    return undefined;
+  }
+  return parsed;
 }
 
 function asRequiredInteger(value: unknown, param: string): number {

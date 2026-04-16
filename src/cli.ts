@@ -25,6 +25,7 @@ const ACTION_SUBCOMMANDS = new Map<string, string>([
   ['resolve', 'action-resolve'],
   ['mark-fp', 'action-mark-fp'],
   ['ingest', 'action-ingest'],
+  ['run', 'action-run'],
 ]);
 
 async function main() {
@@ -462,6 +463,7 @@ ACTION
   action resolve <id>                  Mark an action item resolved
   action mark-fp <id>                  Mark extraction as false positive
   action ingest [--messages-json J]    Extract and ingest commitments from a message batch
+  action run                           Run auto-ingest pipeline (cron-friendly)
 
 TOOLS
   publish <page.md> [--password]     Shareable HTML (strips private data, optional AES-256)
@@ -489,10 +491,11 @@ function printActionHelp() {
 
 Subcommands:
   list [--status S --owner O --stale]
-  brief [--now <iso>] [--last-sync-at <iso>] [--timezone-offset-minutes <minutes>]
+  brief [--now <iso>] [--last-sync-at <iso>] [--checkpoint-path <path>] [--timezone-offset-minutes <minutes>]
   resolve <id>
   mark-fp <id>
   ingest [--messages-json <json>] [--model <model>] [--timeout-ms <ms>]
+  run [--checkpoint-path <path>] [--stale-after-hours <hours>] [--wacli-limit <n>]
 `);
 }
 
