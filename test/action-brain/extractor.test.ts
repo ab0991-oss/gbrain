@@ -798,6 +798,27 @@ describe('runCommitmentQualityGate', () => {
     expect(sonnetCalls).toBe(10);
   });
 
+  test('quality gate forwards owner context into extractor prompts', async () => {
+    const fakeClient = new FakeAnthropicClient(({ prompt }) => {
+      const msgId = extractMsgId(prompt);
+      return toolResponse(canonicalByMsgId.get(msgId) ?? []);
+    });
+
+    const result = await runCommitmentQualityGate(goldSet, {
+      client: fakeClient,
+      ownerName: 'Abhinav Bansal',
+      ownerAliases: ['Abhi', 'Abbhinaav'],
+      threshold: 0.8,
+    });
+
+    expect(result.escalated).toBe(false);
+    expect(fakeClient.calls.length).toBe(10);
+    for (const call of fakeClient.calls) {
+      expect(call.prompt).toContain('You are extracting commitments for the owner: Abhinav Bansal.');
+      expect(call.prompt).toContain('The owner may also appear as: Abhi, Abbhinaav.');
+    }
+  });
+
   test('#25 quality gate reports per-case mismatch details for reviewability', async () => {
     const fakeClient = new FakeAnthropicClient(({ model, prompt }) => {
       const msgId = extractMsgId(prompt);
