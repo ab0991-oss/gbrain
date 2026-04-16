@@ -352,6 +352,64 @@ describe('runActionIngest', () => {
       expect(summary.commitmentsCreated).toBe(1);
     });
   });
+
+  test('fails fast when failOnDegraded=true and store health is stale', async () => {
+    await withDb(async (db) => {
+      const root = createTempDir();
+      const checkpointPath = join(root, 'wacli-checkpoint.json');
+      let extractorCalled = false;
+
+      const summary = await runActionIngest({
+        db,
+        failOnDegraded: true,
+        collectorOptions: { checkpointPath },
+        collector: async (_options: CollectWacliMessagesOptions): Promise<WacliCollectionResult> => ({
+          collectedAt: '2026-04-16T12:00:00.000Z',
+          checkpointPath,
+          limit: 200,
+          staleAfterHours: 24,
+          stores: [
+            {
+              storeKey: 'personal',
+              storePath: '/stores/personal',
+              checkpointBefore: null,
+              checkpointAfter: '2026-04-16T11:00:00.000Z',
+              batchSize: 1,
+              lastSyncAt: '2026-04-15T10:00:00.000Z',
+              degraded: true,
+              degradedReason: 'last_sync_stale',
+              error: null,
+              messages: [message('m6', '2026-04-16T11:00:00.000Z', 'Joe to send invoice')],
+            },
+          ],
+          messages: [message('m6', '2026-04-16T11:00:00.000Z', 'Joe to send invoice')],
+          degraded: true,
+          checkpoint: {
+            version: 1,
+            stores: {
+              personal: {
+                after: '2026-04-16T11:00:00.000Z',
+                message_ids_at_after: ['m6'],
+                updated_at: '2026-04-16T12:00:00.000Z',
+              },
+            },
+          },
+        }),
+        extractor: async () => {
+          extractorCalled = true;
+          return [commitment('Joe', 'Send invoice', 'm6', 0.9)];
+        },
+      });
+
+      expect(summary.success).toBe(false);
+      expect(summary.degraded).toBe(true);
+      expect(summary.healthStatus).toBe('degraded');
+      expect(summary.failure?.stage).toBe('health');
+      expect(summary.alerts[0]).toContain('stale');
+      expect(summary.commitmentsCreated).toBe(0);
+      expect(extractorCalled).toBe(false);
+    });
+  });
 });
 
 async function withDb<T>(fn: (db: ActionDb) => Promise<T>): Promise<T> {

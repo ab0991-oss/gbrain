@@ -262,6 +262,10 @@ export const actionBrainOperations: Operation[] = [
         type: 'number',
         description: 'Mark stores degraded when latest sync is older than this many hours (default: 24)',
       },
+      fail_on_degraded: {
+        type: 'boolean',
+        description: 'Fail the run when health is degraded (for strict scheduler gating)',
+      },
       personal_store_path: { type: 'string', description: 'Override personal wacli store path' },
       business_store_path: { type: 'string', description: 'Override business wacli store path' },
     },
@@ -288,6 +292,7 @@ export const actionBrainOperations: Operation[] = [
         actor: asOptionalNonEmptyString(p.actor) ?? undefined,
         model: asOptionalNonEmptyString(p.model) ?? undefined,
         timeoutMs: asOptionalNumber(p.timeout_ms),
+        failOnDegraded: parseOptionalBoolean(p.fail_on_degraded) ?? false,
         ownerName: asOptionalNonEmptyString(p.owner_name) ?? undefined,
         ownerAliases: ownerAliases.length > 0 ? ownerAliases : undefined,
         collectorOptions: {
