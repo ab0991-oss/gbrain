@@ -10,8 +10,12 @@ import {
   type WacliStoreCollectionResult,
   writeWacliCollectorCheckpoint,
 } from './collector.ts';
-import { extractCommitments, type StructuredCommitment, type WhatsAppMessage } from './extractor.ts';
+import { extractCommitments, type StructuredCommitment } from './extractor.ts';
 import { initActionSchema } from './action-schema.ts';
+import {
+  resolveSourceMessage as resolveStoreQualifiedSourceMessage,
+  resolveSourceMessageId as resolveStoreQualifiedSourceMessageId,
+} from './source-identity.ts';
 
 interface QueryResult<T> {
   rows: T[];
@@ -152,9 +156,9 @@ export async function runActionIngest(options: RunActionIngestOptions): Promise<
   const sourceOrdinalByMessageId = new Map<string, number>();
   try {
     for (const commitment of commitments) {
-      const sourceMessage = resolveSourceMessage(collection.messages, commitment);
+      const sourceMessage = resolveStoreQualifiedSourceMessage(collection.messages, commitment);
       const sourceMessageId = buildCommitmentSourceId(
-        resolveSourceMessageId(collection.messages, commitment, sourceMessage),
+        resolveStoreQualifiedSourceMessageId(collection.messages, commitment, sourceMessage),
         commitment,
         sourceOrdinalByMessageId
       );
@@ -208,41 +212,6 @@ export async function runActionIngest(options: RunActionIngestOptions): Promise<
     summary.failure = toFailure('checkpoint', err);
     return summary;
   }
-}
-
-function resolveSourceMessage(messages: WhatsAppMessage[], commitment: StructuredCommitment): WhatsAppMessage | null {
-  if (messages.length === 0) {
-    return null;
-  }
-
-  const explicitSourceMessageId = asOptionalNonEmptyString(commitment.source_message_id);
-  if (explicitSourceMessageId) {
-    const matched = messages.find((message) => message.MsgID === explicitSourceMessageId);
-    if (matched) {
-      return matched;
-    }
-    // LLM supplied a source_message_id that doesn't match any message in the batch. For single-message
-    // batches, fall through to the default below — the commitment can only originate from the one message.
-    // For multi-message batches this returns null, which the caller treats as an unattributed commitment.
-  }
-
-  return messages.length === 1 ? messages[0] : null;
-}
-
-function resolveSourceMessageId(
-  messages: WhatsAppMessage[],
-  commitment: StructuredCommitment,
-  message: WhatsAppMessage | null
-): string | null {
-  if (message) {
-    return message.MsgID;
-  }
-
-  if (messages.length === 0) {
-    return asOptionalNonEmptyString(commitment.source_message_id);
-  }
-
-  return null;
 }
 
 function buildCommitmentSourceId(

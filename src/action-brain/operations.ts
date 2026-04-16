@@ -11,6 +11,10 @@ import {
 import { extractCommitments, type StructuredCommitment, type WhatsAppMessage } from './extractor.ts';
 import { runActionIngest } from './ingest-runner.ts';
 import { initActionSchema } from './action-schema.ts';
+import {
+  resolveSourceMessage as resolveStoreQualifiedSourceMessage,
+  resolveSourceMessageId as resolveStoreQualifiedSourceMessageId,
+} from './source-identity.ts';
 
 interface QueryResult<T> {
   rows: T[];
@@ -208,9 +212,9 @@ export const actionBrainOperations: Operation[] = [
       let createdCount = 0;
       for (let i = 0; i < extracted.length; i += 1) {
         const commitment = extracted[i];
-        const message = resolveSourceMessage(messages, commitment);
+        const message = resolveStoreQualifiedSourceMessage(messages, commitment);
         const sourceMessageId = buildCommitmentSourceId(
-          resolveSourceMessageId(messages, commitment, message),
+          resolveStoreQualifiedSourceMessageId(messages, commitment, message),
           commitment,
           sourceOrdinalByMessageId
         );
@@ -387,6 +391,8 @@ function parseMessagesParam(value: unknown): WhatsAppMessage[] {
     const msgId = asOptionalNonEmptyString(entry.MsgID);
     const text = asOptionalNonEmptyString(entry.Text);
     if (!msgId || !text) continue;
+    const storeKey = asOptionalNonEmptyString(entry.store_key ?? entry.storeKey);
+    const storePath = asOptionalNonEmptyString(entry.store_path ?? entry.storePath);
 
     normalized.push({
       ChatName: asOptionalNonEmptyString(entry.ChatName) ?? '',
@@ -394,6 +400,8 @@ function parseMessagesParam(value: unknown): WhatsAppMessage[] {
       Timestamp: asOptionalNonEmptyString(entry.Timestamp) ?? '',
       Text: text,
       MsgID: msgId,
+      store_key: storeKey ?? null,
+      store_path: storePath ?? null,
     });
   }
 
@@ -468,39 +476,6 @@ function parseStringArrayParam(value: unknown): string[] {
   return raw
     .map((entry) => asOptionalNonEmptyString(entry))
     .filter((entry): entry is string => Boolean(entry));
-}
-
-function resolveSourceMessage(messages: WhatsAppMessage[], commitment: StructuredCommitment): WhatsAppMessage | null {
-  if (messages.length === 0) {
-    return null;
-  }
-
-  const explicitSourceMessageId = asOptionalNonEmptyString(commitment.source_message_id);
-  if (explicitSourceMessageId) {
-    const matched = messages.find((message) => message.MsgID === explicitSourceMessageId);
-    if (matched) {
-      return matched;
-    }
-  }
-
-  return messages.length === 1 ? messages[0] : null;
-}
-
-function resolveSourceMessageId(
-  messages: WhatsAppMessage[],
-  commitment: StructuredCommitment,
-  message: WhatsAppMessage | null
-): string | null {
-  if (message) {
-    return message.MsgID;
-  }
-
-  // Only trust direct source ids when no message batch is available to validate against.
-  if (messages.length === 0) {
-    return asOptionalNonEmptyString(commitment.source_message_id);
-  }
-
-  return null;
 }
 
 function buildCommitmentSourceId(
