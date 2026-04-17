@@ -17,8 +17,12 @@ interface QueryResult<T> {
   rows: T[];
 }
 
-interface ActionDb {
+interface ActionQueryDb {
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<QueryResult<T>>;
+  transaction?<T>(fn: (db: ActionQueryDb) => Promise<T>): Promise<T>;
+}
+
+interface ActionDb extends ActionQueryDb {
   exec: (sql: string) => Promise<unknown>;
 }
 
@@ -143,7 +147,7 @@ export async function runActionIngest(options: RunActionIngestOptions): Promise<
 
   const engine = new ActionEngine(options.db);
   try {
-    await engine.transaction(async () => {
+    await engine.transaction(async (txEngine) => {
       let commitmentsCreated = 0;
       let duplicatesSkipped = 0;
 
@@ -154,7 +158,7 @@ export async function runActionIngest(options: RunActionIngestOptions): Promise<
           commitment
         );
 
-        const result = await engine.createItemWithResult(
+        const result = await txEngine.createItemWithResult(
           {
             title: toActionTitle(commitment.owes_what),
             type: commitment.type,

@@ -19,6 +19,7 @@ interface QueryResult<T> {
 interface QueryableDb {
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<QueryResult<T>>;
   exec?: (sql: string) => Promise<unknown>;
+  transaction?<T>(fn: (db: QueryableDb) => Promise<T>): Promise<T>;
 }
 
 interface ExecQueryableDb extends QueryableDb {
@@ -27,8 +28,7 @@ interface ExecQueryableDb extends QueryableDb {
 
 interface PostgresUnsafeConnection {
   unsafe: (sql: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
-  reserve?: () => Promise<PostgresUnsafeConnection>;
-  release?: () => Promise<void>;
+  begin?: <T>(fn: (tx: PostgresUnsafeConnection) => Promise<T>) => Promise<T>;
 }
 
 const STATUS_VALUES = ['open', 'waiting_on', 'in_progress', 'stale', 'resolved', 'dropped'] as const;
@@ -333,22 +333,37 @@ async function resolveActionDb(engine: BrainEngine): Promise<QueryableDb> {
 
   const sql = candidate.sql as PostgresUnsafeConnection | undefined;
   if (sql && typeof sql.unsafe === 'function') {
-    // Use the pool directly (not sql.reserve) to avoid holding a dedicated connection indefinitely.
-    // Each query checks out a connection from the pool and returns it when done.
-    const wrapped: QueryableDb = {
-      query: async <T = Record<string, unknown>>(statement: string, params: unknown[] = []) => {
-        const rows = params.length === 0 ? await sql.unsafe(statement) : await sql.unsafe(statement, params);
-        return { rows: rows as T[] };
-      },
-      exec: async (statement: string) => {
-        await sql.unsafe(statement);
-      },
-    };
+    const wrapped = wrapPostgresConnection(sql, true);
     postgresDbCache.set(cacheKey, wrapped);
     return wrapped;
   }
 
   throw new Error('Unsupported engine for Action Brain operations. Expected PGLiteEngine or PostgresEngine.');
+}
+
+function wrapPostgresConnection(sql: PostgresUnsafeConnection, allowBegin: boolean): QueryableDb {
+  const wrapped: QueryableDb = {
+    query: async <T = Record<string, unknown>>(statement: string, params: unknown[] = []) => {
+      const rows = params.length === 0 ? await sql.unsafe(statement) : await sql.unsafe(statement, params);
+      return { rows: rows as T[] };
+    },
+    exec: async (statement: string) => {
+      await sql.unsafe(statement);
+    },
+  };
+
+  wrapped.transaction = async <T>(fn: (db: QueryableDb) => Promise<T>) => {
+    if (!allowBegin || typeof sql.begin !== 'function') {
+      return fn(wrapped);
+    }
+    return sql.begin(async (tx) => fn(wrapPostgresConnection(tx, false)));
+  };
+
+  return wrapped;
+}
+
+export async function __resolveActionDbForTests(engine: BrainEngine): Promise<QueryableDb> {
+  return resolveActionDb(engine);
 }
 
 function requireExecQueryableDb(db: QueryableDb): ExecQueryableDb {

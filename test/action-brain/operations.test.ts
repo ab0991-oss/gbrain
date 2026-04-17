@@ -5,7 +5,7 @@ import { tmpdir } from 'os';
 import { mergeOperationSets, operations } from '../../src/core/operations.ts';
 import type { Operation, OperationContext } from '../../src/core/operations.ts';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
-import { actionBrainOperations } from '../../src/action-brain/operations.ts';
+import { __resolveActionDbForTests, actionBrainOperations } from '../../src/action-brain/operations.ts';
 import { writeWacliCollectorCheckpoint } from '../../src/action-brain/collector.ts';
 
 function makeOperation(name: string, cliName?: string): Operation {
@@ -97,6 +97,44 @@ describe('Action Brain operation integration', () => {
 
     expect(exitCode).toBe(0);
     expect(stdout).toContain('Usage: gbrain action run');
+  });
+
+  test('postgres action adapter uses sql.begin transaction context for multi-query units', async () => {
+    const poolCalls: string[] = [];
+    const txCalls: string[] = [];
+    let beginCalls = 0;
+
+    const txConnection = {
+      unsafe: async (statement: string, _params?: unknown[]) => {
+        txCalls.push(statement);
+        return [];
+      },
+    };
+
+    const engine = {
+      sql: {
+        unsafe: async (statement: string, _params?: unknown[]) => {
+          poolCalls.push(statement);
+          return [];
+        },
+        begin: async <T>(fn: (tx: typeof txConnection) => Promise<T>): Promise<T> => {
+          beginCalls += 1;
+          return fn(txConnection);
+        },
+      },
+    } as any;
+
+    const db = await __resolveActionDbForTests(engine);
+    expect(typeof db.transaction).toBe('function');
+
+    await db.transaction?.(async (txDb) => {
+      await txDb.query('SELECT 1');
+      await txDb.exec?.('SELECT 2');
+    });
+
+    expect(beginCalls).toBe(1);
+    expect(txCalls).toEqual(['SELECT 1', 'SELECT 2']);
+    expect(poolCalls).toEqual([]);
   });
 
   test('action_ingest stays idempotent when commitments arrive in different output order', async () => {

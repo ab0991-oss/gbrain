@@ -19,6 +19,73 @@ async function createEngine(): Promise<{ db: PGlite; engine: ActionEngine }> {
 }
 
 describe('ActionEngine', () => {
+  test('prefers adapter transaction callbacks over raw BEGIN/COMMIT wrappers', async () => {
+    const statements: string[] = [];
+    let transactionCalls = 0;
+
+    const txDb = {
+      query: async <T = Record<string, unknown>>(sql: string): Promise<{ rows: T[] }> => {
+        statements.push(sql);
+
+        if (sql.includes('WITH inserted AS')) {
+          return {
+            rows: [
+              {
+                id: 42,
+                title: 'Send cargo docs',
+                type: 'commitment',
+                status: 'open',
+                owner: 'Joe',
+                waiting_on: null,
+                due_at: null,
+                stale_after_hours: 48,
+                priority_score: 0,
+                confidence: 0.9,
+                source_message_id: 'msg-tx-001',
+                source_thread: 'Ops',
+                source_contact: 'Joe',
+                linked_entity_slugs: [],
+                created_at: '2026-04-16T00:00:00.000Z',
+                updated_at: '2026-04-16T00:00:00.000Z',
+                resolved_at: null,
+                was_inserted: true,
+              } as T,
+            ],
+          };
+        }
+
+        if (sql.includes('INSERT INTO action_history')) {
+          return { rows: [] };
+        }
+
+        throw new Error(`Unexpected SQL in test adapter: ${sql}`);
+      },
+    };
+
+    const adapter = {
+      query: async (): Promise<{ rows: [] }> => {
+        throw new Error('Expected ActionEngine to run queries through the transaction-scoped adapter');
+      },
+      transaction: async <T>(fn: (db: typeof txDb) => Promise<T>): Promise<T> => {
+        transactionCalls += 1;
+        return fn(txDb);
+      },
+    };
+
+    const engine = new ActionEngine(adapter);
+    const item = await engine.createItem({
+      title: 'Send cargo docs',
+      type: 'commitment',
+      source_message_id: 'msg-tx-001',
+      owner: 'Joe',
+    });
+
+    expect(item.id).toBe(42);
+    expect(transactionCalls).toBe(1);
+    expect(statements.some((sql) => sql === 'BEGIN')).toBe(false);
+    expect(statements.some((sql) => sql === 'COMMIT')).toBe(false);
+  });
+
   test('createItem inserts a new action and writes created history', async () => {
     const { db: localDb, engine } = await createEngine();
 
