@@ -107,7 +107,7 @@ parity), `test/cli.test.ts` (CLI structure), `test/config.test.ts` (config redac
 `test/action-brain/action-schema.test.ts` (Action Brain DDL + idempotent init),
 `test/action-brain/action-engine.test.ts` (CRUD, scoring, PGLite lifecycle),
 `test/action-brain/extractor.test.ts` (extraction, source ID stability, injection defense, timestamp bounds, owner context),
-`test/action-brain/brief.test.ts` (brief generation, scoring, dedup, overdue detection),
+`test/action-brain/brief.test.ts` (brief generation, scoring, dedup, overdue detection, checkpoint-aware freshness),
 `test/action-brain/collector.test.ts` (wacli file reading, checkpoint store, dedup, freshness filtering, fail-closed on invalid checkpoint, FIFO cap on same-second IDs, collapsed health alert for global checkpoint failure),
 `test/action-brain/ingest-runner.test.ts` (preflight checks, staleness gate, collect/extract/store pipeline, structured JSON output),
 `test/action-brain/operations.test.ts` (all 6 ops, ingest trust boundary, batch fallbacks, action_ingest_auto pipeline),
