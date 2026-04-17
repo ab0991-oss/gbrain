@@ -194,6 +194,94 @@ describe('collectWacliMessages', () => {
     expect(stored.stores.business?.message_ids_at_after).toEqual(['b1']);
   });
 
+  test('merges same-timestamp checkpoint IDs instead of overwriting them', async () => {
+    const root = createTempDir();
+    const checkpointPath = join(root, 'wacli-checkpoint.json');
+    await writeWacliCollectorCheckpoint(checkpointPath, {
+      version: 1,
+      stores: {
+        personal: {
+          after: '2026-04-16T00:00:00.000Z',
+          message_ids_at_after: ['a', 'b'],
+          updated_at: '2026-04-16T00:01:00.000Z',
+        },
+      },
+    });
+
+    const runner: WacliListMessagesRunner = async () => ({
+      success: true,
+      data: {
+        messages: [
+          {
+            MsgID: 'a',
+            ChatName: 'Ops',
+            SenderJID: 'sender@jid',
+            Timestamp: '2026-04-16T00:00:00.000Z',
+            FromMe: false,
+            Text: 'already processed a',
+          },
+          {
+            MsgID: 'b',
+            ChatName: 'Ops',
+            SenderJID: 'sender@jid',
+            Timestamp: '2026-04-16T00:00:00.000Z',
+            FromMe: false,
+            Text: 'already processed b',
+          },
+          {
+            MsgID: 'c',
+            ChatName: 'Ops',
+            SenderJID: 'sender@jid',
+            Timestamp: '2026-04-16T00:00:00.000Z',
+            FromMe: false,
+            Text: 'new same-second message',
+          },
+        ],
+      },
+      error: null,
+    });
+
+    const result = await collectWacliMessages({
+      checkpointPath,
+      stores: [{ key: 'personal', storePath: '/stores/personal' }],
+      now: new Date('2026-04-16T00:30:00.000Z'),
+      runner,
+    });
+
+    expect(result.messages.map((message) => message.MsgID)).toEqual(['c']);
+
+    const stored = await readWacliCollectorCheckpoint(checkpointPath);
+    expect(stored.stores.personal?.after).toBe('2026-04-16T00:00:00.000Z');
+    expect(stored.stores.personal?.message_ids_at_after).toEqual(['a', 'b', 'c']);
+  });
+
+  test('fails closed with explicit degraded checkpoint_read_failed state when checkpoint is invalid', async () => {
+    const root = createTempDir();
+    const checkpointPath = join(root, 'wacli-checkpoint.json');
+    await Bun.write(checkpointPath, '{not-valid-json');
+
+    let calls = 0;
+    const runner: WacliListMessagesRunner = async () => {
+      calls += 1;
+      return { success: true, data: { messages: [] }, error: null };
+    };
+
+    const result = await collectWacliMessages({
+      checkpointPath,
+      stores: [{ key: 'personal', storePath: '/stores/personal' }],
+      now: new Date('2026-04-16T12:00:00.000Z'),
+      runner,
+    });
+
+    expect(calls).toBe(0);
+    expect(result.degraded).toBe(true);
+    expect(result.messages).toEqual([]);
+    expect(result.stores[0]?.degraded).toBe(true);
+    expect(result.stores[0]?.degradedReason).toBe('checkpoint_read_failed');
+    expect(result.stores[0]?.error).toContain('Unable to read collector checkpoint');
+    expect(result.stores[0]?.error).toContain('wacli-checkpoint.json');
+  });
+
   test('marks store as degraded when latest sync is unknown', async () => {
     const root = createTempDir();
     const checkpointPath = join(root, 'wacli-checkpoint.json');

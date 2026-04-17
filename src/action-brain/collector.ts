@@ -39,6 +39,7 @@ export interface CollectedWhatsAppMessage extends WhatsAppMessage {
 export type WacliDegradedReason =
   | 'command_failed'
   | 'invalid_payload'
+  | 'checkpoint_read_failed'
   | 'last_sync_unknown'
   | 'last_sync_stale';
 
@@ -120,11 +121,37 @@ export async function collectWacliMessages(
   const persistCheckpoint = options.persistCheckpoint ?? true;
   const runner = options.runner ?? runWacliMessagesList;
 
-  const checkpoint = await readWacliCollectorCheckpoint(checkpointPath);
+  const checkpointRead = await readWacliCollectorCheckpointForCollect(checkpointPath);
+  const checkpoint = checkpointRead.checkpoint;
   const nextCheckpoint: WacliCollectorCheckpointState = {
     version: CHECKPOINT_VERSION,
     stores: { ...checkpoint.stores },
   };
+
+  if (checkpointRead.error) {
+    const failedStores = stores.map((store) => ({
+      storeKey: store.key,
+      storePath: store.storePath,
+      checkpointBefore: null,
+      checkpointAfter: null,
+      batchSize: 0,
+      lastSyncAt: null,
+      degraded: true,
+      degradedReason: 'checkpoint_read_failed' as const,
+      error: checkpointRead.error,
+      messages: [],
+    }));
+    return {
+      collectedAt: now.toISOString(),
+      checkpointPath,
+      limit,
+      staleAfterHours,
+      stores: failedStores,
+      messages: [],
+      degraded: true,
+      checkpoint: nextCheckpoint,
+    };
+  }
 
   const storeResults: WacliStoreCollectionResult[] = [];
   const allMessages: CollectedWhatsAppMessage[] = [];
@@ -537,6 +564,39 @@ function parseCheckpointState(raw: string): WacliCollectorCheckpointState {
   }
 }
 
+async function readWacliCollectorCheckpointForCollect(
+  checkpointPath: string
+): Promise<{ checkpoint: WacliCollectorCheckpointState; error: string | null }> {
+  try {
+    const raw = await readFile(checkpointPath, 'utf-8');
+    return {
+      checkpoint: parseCheckpointStateStrict(raw),
+      error: null,
+    };
+  } catch (err) {
+    if (isFileNotFoundError(err)) {
+      return { checkpoint: emptyCheckpointState(), error: null };
+    }
+    return {
+      checkpoint: emptyCheckpointState(),
+      error: `Unable to read collector checkpoint (${checkpointPath}): ${errorMessage(err)}`,
+    };
+  }
+}
+
+function parseCheckpointStateStrict(raw: string): WacliCollectorCheckpointState {
+  const parsed = JSON.parse(raw);
+  if (!isRecord(parsed)) {
+    throw new Error('checkpoint payload must be a JSON object');
+  }
+  const version = Number.isInteger(parsed.version) ? Number(parsed.version) : CHECKPOINT_VERSION;
+  const stores = normalizeCheckpointStores(isRecord(parsed.stores) ? (parsed.stores as Record<string, WacliStoreCheckpoint>) : {});
+  return {
+    version,
+    stores,
+  };
+}
+
 function emptyCheckpointState(): WacliCollectorCheckpointState {
   return {
     version: CHECKPOINT_VERSION,
@@ -585,10 +645,17 @@ function advanceCheckpoint(
 
   const sorted = [...newMessages].sort(sortMessagesByTimestampThenIdThenStore);
   const after = sorted[sorted.length - 1]?.Timestamp ?? existing.after;
-  const idsAtAfter = sorted
+  if (!after) {
+    return existing;
+  }
+
+  const nextIdsAtAfter = sorted
     .filter((message) => message.Timestamp === after)
     .map((message) => message.MsgID)
     .sort();
+  const idsAtAfter = after === existing.after
+    ? Array.from(new Set([...existing.message_ids_at_after, ...nextIdsAtAfter])).sort()
+    : nextIdsAtAfter;
 
   return {
     after,
@@ -671,6 +738,10 @@ function normalizeLimit(value: number | undefined): number {
     return DEFAULT_LIMIT;
   }
   return value;
+}
+
+function isFileNotFoundError(err: unknown): boolean {
+  return isRecord(err) && err.code === 'ENOENT';
 }
 
 function normalizeStaleAfterHours(value: number | undefined): number {
