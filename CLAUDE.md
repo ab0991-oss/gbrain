@@ -66,7 +66,7 @@ markdown files (tool-agnostic, work with both CLI and plugin contexts).
 - `src/action-brain/action-engine.ts` — Storage layer: CRUD, priority scoring (urgency × confidence × recency), PGLite lifecycle
 - `src/action-brain/extractor.ts` — LLM commitment extraction (two-tier Haiku→Sonnet), XML delimiter defense, stable source IDs
 - `src/action-brain/brief.ts` — Morning priority brief generator: ranked action items, overdue detection, deduplication; freshness reads from wacli checkpoint (not action item creation time)
-- `src/action-brain/collector.ts` — Wacli message collector: invokes `wacli messages list` CLI, deduplicates by message ID, checkpoint-aware cursor (skips already-processed messages), heartbeat freshness on no-op polls
+- `src/action-brain/collector.ts` — Wacli message collector: invokes `wacli messages list` CLI, deduplicates by message ID, checkpoint-aware cursor (skips already-processed messages), heartbeat freshness on no-op polls. Fails closed on bad checkpoint (invalid JSON, missing/future `version`) via `checkpoint_read_failed` degraded state. Same-second ID set capped at 5,000 with insertion-order FIFO so recently-seen IDs always survive
 - `src/action-brain/ingest-runner.ts` — Auto-ingest orchestrator: preflight checks, staleness gate, collect → extract → store pipeline; cron-ready, returns structured JSON
 - `src/action-brain/operations.ts` — 6 Action Brain operations (action_list, action_brief, action_resolve, action_mark_fp, action_ingest, action_ingest_auto)
 
@@ -108,7 +108,7 @@ parity), `test/cli.test.ts` (CLI structure), `test/config.test.ts` (config redac
 `test/action-brain/action-engine.test.ts` (CRUD, scoring, PGLite lifecycle),
 `test/action-brain/extractor.test.ts` (extraction, source ID stability, injection defense, timestamp bounds),
 `test/action-brain/brief.test.ts` (brief generation, scoring, dedup, overdue detection),
-`test/action-brain/collector.test.ts` (wacli file reading, checkpoint store, dedup, freshness filtering),
+`test/action-brain/collector.test.ts` (wacli file reading, checkpoint store, dedup, freshness filtering, fail-closed on invalid checkpoint, FIFO cap on same-second IDs, collapsed health alert for global checkpoint failure),
 `test/action-brain/ingest-runner.test.ts` (preflight checks, staleness gate, collect/extract/store pipeline, structured JSON output),
 `test/action-brain/operations.test.ts` (all 6 ops, ingest trust boundary, batch fallbacks, action_ingest_auto pipeline).
 
