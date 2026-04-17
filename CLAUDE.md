@@ -65,7 +65,7 @@ markdown files (tool-agnostic, work with both CLI and plugin contexts).
 - `src/action-brain/action-schema.ts` — PGLite DDL + idempotent schema init for action_items / action_history tables
 - `src/action-brain/action-engine.ts` — Storage layer: CRUD, priority scoring (urgency × confidence × recency), PGLite lifecycle; `createItemWithResult()` returns idempotency signal (created vs skipped)
 - `src/action-brain/extractor.ts` — LLM commitment extraction (two-tier Haiku→Sonnet), XML delimiter defense, stable source IDs, owner context injection
-- `src/action-brain/brief.ts` — Morning priority brief generator: ranked action items, overdue detection, deduplication
+- `src/action-brain/brief.ts` — Morning priority brief generator: ranked action items, overdue detection, deduplication; freshness reads from wacli checkpoint (not action item creation time)
 - `src/action-brain/collector.ts` — Wacli message collector: reads WhatsApp export files, deduplicates by message ID, checkpoint-aware (skips already-processed messages)
 - `src/action-brain/ingest-runner.ts` — Auto-ingest orchestrator: preflight checks, staleness gate, collect → extract → store pipeline; cron-ready, returns structured JSON
 - `src/action-brain/operations.ts` — 6 Action Brain operations (action_list, action_brief, action_resolve, action_mark_fp, action_ingest, action_ingest_auto)
@@ -80,7 +80,7 @@ Key commands added in v0.7:
 
 ## Testing
 
-`bun test` runs all tests (35 unit test files + 5 E2E test files). Unit tests run
+`bun test` runs all tests (43 unit test files + 6 E2E test files). Unit tests run
 without a database. E2E tests skip gracefully when `DATABASE_URL` is not set.
 
 Unit tests: `test/markdown.test.ts` (frontmatter parsing), `test/chunkers/recursive.test.ts`
@@ -108,9 +108,13 @@ parity), `test/cli.test.ts` (CLI structure), `test/config.test.ts` (config redac
 `test/action-brain/action-engine.test.ts` (CRUD, scoring, PGLite lifecycle),
 `test/action-brain/extractor.test.ts` (extraction, source ID stability, injection defense, timestamp bounds, owner context),
 `test/action-brain/brief.test.ts` (brief generation, scoring, dedup, overdue detection),
-`test/action-brain/collector.test.ts` (wacli file reading, checkpoint store, dedup, freshness filtering),
+`test/action-brain/collector.test.ts` (wacli file reading, checkpoint store, dedup, freshness filtering, fail-closed on invalid checkpoint, FIFO cap on same-second IDs, collapsed health alert for global checkpoint failure),
 `test/action-brain/ingest-runner.test.ts` (preflight checks, staleness gate, collect/extract/store pipeline, structured JSON output),
-`test/action-brain/operations.test.ts` (all 6 ops, ingest trust boundary, batch fallbacks, action_ingest_auto pipeline).
+`test/action-brain/operations.test.ts` (all 6 ops, ingest trust boundary, batch fallbacks, action_ingest_auto pipeline),
+`test/embed.test.ts` (embedding interface contract),
+`test/import-walker.test.ts` (directory walker, symlink handling, file filtering),
+`test/pglite-lock.test.ts` (PGLite concurrent access and lock behavior),
+`test/search-limit.test.ts` (MAX_SEARCH_LIMIT constant, clampSearchLimit bounds).
 
 E2E tests (`test/e2e/`): Run against real Postgres+pgvector. Require `DATABASE_URL`.
 - `bun run test:e2e` runs Tier 1 (mechanical, all operations, no API keys)

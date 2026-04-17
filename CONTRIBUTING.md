@@ -40,10 +40,12 @@ src/
   action-brain/           Action Brain extension (commitment/obligation tracking)
     types.ts              Shared types (ActionItem, CommitmentBatch, ExtractionResult)
     action-schema.ts      PGLite DDL + schema init for action_items/action_history tables
-    action-engine.ts      Storage layer: CRUD, priority scoring, PGLite lifecycle
+    action-engine.ts      Storage layer: CRUD, priority scoring, PGLite lifecycle; createItemWithResult() for idempotency signal
     extractor.ts          LLM commitment extraction with prompt injection defense
-    brief.ts              Morning priority brief generator (ranked + deduped)
-    operations.ts         5 registered ops: action_list/brief/resolve/mark-fp/ingest
+    brief.ts              Morning priority brief generator (ranked + deduped, checkpoint-aware)
+    collector.ts          Wacli message collector: checkpoint-aware cursor, dedup by message ID, FIFO cap, fail-closed on bad checkpoint
+    ingest-runner.ts      Auto-ingest orchestrator: preflight checks, staleness gate, collect→extract→store pipeline, structured JSON
+    operations.ts         6 registered ops: action_list, action_brief, action_resolve, action_mark_fp, action_ingest, action_ingest_auto
   schema.sql              Postgres DDL
 skills/                   Fat markdown skills for AI agents
 test/                     Unit tests (bun test, no DB required)
