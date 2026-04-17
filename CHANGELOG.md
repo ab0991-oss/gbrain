@@ -8,6 +8,11 @@ All notable changes to GBrain will be documented in this file.
 
 - **Wacli collector with checkpoint store.** `collector.ts` reads your WhatsApp export files from the wacli local store and maintains a checkpoint so the ingest pipeline only processes new messages since the last run. Deterministic parsing, dedup-safe, and cron-friendly — no duplicate ingestion on re-runs.
 
+### Fixed
+
+- **Collector fails closed on corrupted checkpoint.** If the checkpoint file exists but cannot be parsed, the collector now returns a `checkpoint_read_failed` degraded state and skips wacli entirely — preventing runaway ingestion from a bad state file.
+- **Same-second message deduplication.** When multiple messages share the same timestamp across poll cycles, their IDs are now merged into the checkpoint rather than overwritten — closing a gap where fast-arriving messages could slip through the dedup filter.
+
 ## [0.10.0] - 2026-04-16
 
 ### Added
