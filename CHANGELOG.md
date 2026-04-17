@@ -2,6 +2,15 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.10.2] - 2026-04-17
+
+### Fixed
+
+- **Wacli collector now drops *oldest* same-second IDs, not lex-smallest, when capped.** The 5,000-ID per-timestamp cap is the last line of defense against a runaway WhatsApp burst pinning the checkpoint to one second. Previously a `slice(-5000)` after `.sort()` kept lex-largest IDs and could silently drop the IDs you'd just observed — leading to forever-replay (and burned LLM extraction cost) or, worse, silent loss if `wacli --after` is ever strict-exclusive. Now the cap is a true insertion-order FIFO: oldest seen IDs roll off the front first, newly-seen IDs always survive.
+- **Checkpoint reads now fail closed on bad version fields.** `parseCheckpointStateStrict` rejects checkpoint payloads with missing/non-integer `version` or a version newer than this build supports — instead of silently coercing to current and reusing incompatible cursor state. Collector returns `checkpoint_read_failed` and skips wacli rather than replaying history.
+- **Health summary collapses global checkpoint failures into one alert.** When the collector checkpoint is unreadable every store gets stamped `checkpoint_read_failed`. `summarizeWacliHealth` now emits a single top-level alert instead of N identical per-store alerts so the brief stays readable during outages.
+- **`gbrain --version` finally reports the right version.** `package.json` was stuck at `0.9.3` while `VERSION` had moved past it. Synced both to `0.10.2` so CLI, MCP server, and upgrade flow all agree.
+
 ## [0.10.1] - 2026-04-16
 
 ### Added
