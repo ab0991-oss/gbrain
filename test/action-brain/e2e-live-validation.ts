@@ -1,290 +1,341 @@
 /**
- * End-to-end live validation: real WhatsApp messages → Action Brain extractor
+ * End-to-end extractor validation harness.
  *
- * Feeds 13 real messages from wacli SQLite through the commitment extractor
- * and evaluates accuracy against manually labeled expectations.
+ * Uses a sanitized built-in gold set by default to avoid committing sensitive
+ * WhatsApp content. For real-message validation, set:
+ *   ACTION_BRAIN_LIVE_GOLDSET_PATH=/absolute/path/to/gold-set.json
  *
  * Run: source ~/.zshrc && bun run test/action-brain/e2e-live-validation.ts
  */
 
-import { extractCommitments, type WhatsAppMessage, type StructuredCommitment } from '../../src/action-brain/extractor.ts';
+import { readFile } from 'node:fs/promises';
+import { extractCommitments, type StructuredCommitment, type WhatsAppMessage } from '../../src/action-brain/extractor.ts';
 
-interface GoldSetEntry {
-  message: WhatsAppMessage;
-  expectedCommitments: Array<{
-    who: string;
-    action: string; // substring match on owes_what
-    type: string;
-  }>;
+interface ExpectedCommitment {
+  who: string;
+  action: string;
+  type: string;
 }
 
-const GOLD_SET: GoldSetEntry[] = [
+export interface GoldSetEntry {
+  message: WhatsAppMessage;
+  expectedCommitments: ExpectedCommitment[];
+}
+
+interface ValidationTotals {
+  expected: number;
+  extracted: number;
+  matched: number;
+  missed: number;
+  falsePositives: number;
+}
+
+export interface ValidationSummary {
+  totals: ValidationTotals;
+  recall: number;
+  precision: number;
+  f1: number;
+  threshold: number;
+  passed: boolean;
+}
+
+export interface RunValidationOptions {
+  ownerName?: string;
+  ownerAliases?: string[];
+  threshold?: number;
+}
+
+const DEFAULT_THRESHOLD = 0.9;
+
+export const DEFAULT_GOLD_SET: GoldSetEntry[] = [
   {
     message: {
-      MsgID: 'AC7991B81A649C77F914AD27E6DB6FFF',
-      ChatName: 'Joe MacPherson',
-      SenderName: 'Joe MacPherson',
-      Timestamp: '2026-04-15T20:02:23Z',
-      Text: 'Sounds good. Just nominate a time and I will meet you guys in the resto, where the bar is.',
+      MsgID: 'SAN-001',
+      ChatName: 'Ops Thread',
+      SenderName: 'Jordan',
+      Timestamp: '2026-04-16T08:00:00Z',
+      Text: 'I will send the signed invoice bundle by 5pm today.',
     },
     expectedCommitments: [
-      { who: 'Joe MacPherson', action: 'meet', type: 'waiting_on' },
+      { who: 'Jordan', action: 'send the signed invoice bundle', type: 'waiting_on' },
     ],
   },
   {
     message: {
-      MsgID: 'A5A28866ED77D7AD212E303269ECDBEF',
-      ChatName: 'Parathan',
-      SenderName: 'Parathan',
-      Timestamp: '2026-04-15T20:35:27Z',
-      Text: 'Booked hotel for Joe, heading back to meet him now\n\nGot bank account access but otp will work 24 hours from now',
+      MsgID: 'SAN-002',
+      ChatName: 'Ops Thread',
+      SenderName: 'Taylor',
+      Timestamp: '2026-04-16T08:10:00Z',
+      Text: 'Please approve this transfer before noon.',
     },
     expectedCommitments: [
-      { who: 'Parathan', action: 'hotel', type: 'waiting_on' },
-      { who: 'Parathan', action: 'bank account', type: 'waiting_on' },
+      { who: 'Owner', action: 'approve this transfer', type: 'owed_by_me' },
     ],
   },
   {
     message: {
-      MsgID: '3A2F4B47DBF612141C95',
-      ChatName: 'Parathan',
-      SenderName: 'Abbhinaav',
-      Timestamp: '2026-04-15T23:06:31Z',
-      Text: "Bro, we have to sit down tonight itself. I will tell you when we are on our way back because we are not sure if Sagar will be back in time for the meeting Joe before he flies to keyrwa",
+      MsgID: 'SAN-003',
+      ChatName: 'Vendors',
+      SenderName: 'Morgan',
+      Timestamp: '2026-04-16T08:20:00Z',
+      Text: 'I will call the rail dispatcher and confirm the slot this morning.',
     },
     expectedCommitments: [
-      { who: 'Abbhinaav', action: 'sit down', type: 'owed_by_me' },
+      { who: 'Morgan', action: 'call the rail dispatcher', type: 'waiting_on' },
     ],
   },
   {
     message: {
-      MsgID: '3B9B1D7349473CCBB6ED',
-      ChatName: 'Parathan',
-      SenderName: 'Parathan',
-      Timestamp: '2026-04-15T23:09:00Z',
-      Text: "I managed to get Mobile OTP set up, it will be active from 3pm tomorrow onwards\n\nSagar Patel is yet to get his phone set up with Josephina's account.",
+      MsgID: 'SAN-004',
+      ChatName: 'Finance',
+      SenderName: 'Casey',
+      Timestamp: '2026-04-16T08:30:00Z',
+      Text: 'Could you upload the purchase order copy when you are free?',
     },
     expectedCommitments: [
-      { who: 'Sagar Patel', action: 'phone', type: 'waiting_on' },
+      { who: 'Owner', action: 'upload the purchase order copy', type: 'owed_by_me' },
     ],
   },
   {
     message: {
-      MsgID: '3B745E82E325DDD5DBD6',
-      ChatName: 'Parathan',
-      SenderName: 'Parathan',
-      Timestamp: '2026-04-16T02:20:45Z',
-      Text: 'Will be contacting the places to visit tomorrow morning and heading in to check them out same day',
+      MsgID: 'SAN-005',
+      ChatName: 'Ops Thread',
+      SenderName: 'Jordan',
+      Timestamp: '2026-04-16T08:40:00Z',
+      Text: 'Shipment 14 reached the yard. No action required.',
+    },
+    expectedCommitments: [],
+  },
+  {
+    message: {
+      MsgID: 'SAN-006',
+      ChatName: 'Ops Thread',
+      SenderName: 'Jordan',
+      Timestamp: '2026-04-16T08:50:00Z',
+      Text: 'Please ask Alex to send the customs declaration by EOD.',
     },
     expectedCommitments: [
-      { who: 'Parathan', action: 'contact', type: 'waiting_on' },
+      { who: 'Alex', action: 'send the customs declaration', type: 'waiting_on' },
     ],
   },
   {
     message: {
-      MsgID: '3B74E87B3E4EA12D491C',
-      ChatName: 'Parathan',
-      SenderName: 'Parathan',
-      Timestamp: '2026-04-16T04:31:11Z',
-      Text: 'Is ~10am good for a breakfast chat with Joe for you? I think you need to have the chat regarding the geo interviews with him',
+      MsgID: 'SAN-007',
+      ChatName: 'Bank',
+      SenderName: 'Bank Desk',
+      Timestamp: '2026-04-16T09:00:00Z',
+      Text: 'Payment is pending. Kindly pay immediately to avoid suspension.',
     },
     expectedCommitments: [
-      { who: 'Abbhinaav', action: 'chat', type: 'owed_by_me' },
+      { who: 'Owner', action: 'pay immediately', type: 'owed_by_me' },
     ],
   },
   {
     message: {
-      MsgID: '3A099ACDC1F8852C7742',
-      ChatName: 'Parathan',
-      SenderName: 'Abbhinaav',
-      Timestamp: '2026-04-16T05:34:42Z',
-      Text: 'Bro make sure to take Sagar patel with you',
+      MsgID: 'SAN-008',
+      ChatName: 'Ops Thread',
+      SenderName: 'Morgan',
+      Timestamp: '2026-04-16T09:10:00Z',
+      Text: 'I initiated the transfer, please check and authorised it as trial payment.',
     },
     expectedCommitments: [
-      { who: 'Parathan', action: 'Sagar', type: 'waiting_on' },
-    ],
-  },
-  {
-    message: {
-      MsgID: '2ADAE26D5343E0877C1C',
-      ChatName: 'Vivian',
-      SenderName: 'Vivian',
-      Timestamp: '2026-04-16T09:51:30Z',
-      Text: "Hello Abhinav,\nThe landlord is chasing for the signed TA and payment ……. \nKindly assist to sign today.   Thank you.   Have a nice weekend!   \n\nDear Vivian,\n \nPlease let us know when payment is complete. \nIn addition, we require the Tenant to counter wet ink sign the TA against his digital signatories when he is back. The wet ink signed TA should be provided to us before the lease commencement.\n \nThank you.",
-    },
-    expectedCommitments: [
-      { who: 'Abbhinaav', action: 'sign', type: 'owed_by_me' },
-      { who: 'Abbhinaav', action: 'payment', type: 'owed_by_me' },
-    ],
-  },
-  {
-    message: {
-      MsgID: '3EB00EA84CF3264910F885',
-      ChatName: 'tenorioerwin30',
-      SenderName: 'tenorioerwin30',
-      Timestamp: '2026-04-16T10:18:23Z',
-      Text: 'Dear customer, SGD126.84 is overdue for 4 days. Please pay immediately to unlock your app. You can visit our FAQs on your App for more info. Thank you.',
-    },
-    expectedCommitments: [
-      { who: 'Abbhinaav', action: 'pay', type: 'owed_by_me' },
-    ],
-  },
-  {
-    message: {
-      MsgID: 'A5DCF2F0D59B15C565A8B2EF1D03CFBE',
-      ChatName: 'Parathan',
-      SenderName: 'Parathan',
-      Timestamp: '2026-04-16T14:52:19Z',
-      Text: 'Alright will let Joe know 👍',
-    },
-    expectedCommitments: [
-      { who: 'Parathan', action: 'Joe', type: 'waiting_on' },
-    ],
-  },
-  {
-    message: {
-      MsgID: '3EB028621FBCEFD44B1FB4',
-      ChatName: 'KAGERA TIN- ACCOUNT',
-      SenderName: 'Sagar Patel',
-      Timestamp: '2026-04-16T19:53:43Z',
-      Text: '@31538146189329 THIS PAYMENT I INITIATED TO MR. MUKESH VIA CRDB  3.2M TZS Pls check and authorised as Trial payment',
-    },
-    expectedCommitments: [
-      { who: 'Abbhinaav', action: 'authoris', type: 'owed_by_me' },
-    ],
-  },
-  {
-    message: {
-      MsgID: 'AC3F8A98EBF583C91FF222633639716B',
-      ChatName: 'KAGERA TIN- ACCOUNT',
-      SenderName: 'Vidyasagar',
-      Timestamp: '2026-04-16T20:05:55Z',
-      Text: '@165914603471039 @151140335358101 . internet banking access have been given to Parathan & Sagar patel \n\n(1) Payment initiater (Sagar patel ) \n\n(2) Approval - ( Paratan or Denare)',
-    },
-    expectedCommitments: [], // informational status update, no new commitment
-  },
-  {
-    message: {
-      MsgID: '3AB97AA2C7C2AC4A1A7D',
-      ChatName: 'Nichol',
-      SenderName: 'Nichol',
-      Timestamp: '2026-04-16T20:23:17Z',
-      Text: "1. Sure I can make march a full month. \n2. ⁠denare will lend you 24k, payable 2k a month over the next year. \n3. ⁠will you be cashflow positive each month? If not it's just going to be ballooning and it's never ending. If you have other debts, I suggest you (after some track record), take out a bank loan to pay things off lump sum and slowly pay back the loans, maintaining monthly positive cash flow",
-    },
-    expectedCommitments: [
-      { who: 'Nichol', action: 'full month', type: 'waiting_on' },
-      { who: 'Denare', action: 'lend', type: 'waiting_on' },
+      { who: 'Owner', action: 'authorize it', type: 'owed_by_me' },
     ],
   },
 ];
 
-const OWNER_NAMES = ['abhinav bansal', 'abbhinaav', 'abhi', 'abhinav'];
+const OWNER_NAMES = ['owner', 'abhinav bansal', 'abbhinaav', 'abhi', 'abhinav'];
 
-function isOwnerName(name: string): boolean {
-  return OWNER_NAMES.some(n => name.toLowerCase().includes(n));
+export function isOwnerName(name: string): boolean {
+  const normalized = name.trim().toLowerCase();
+  return OWNER_NAMES.some((owner) => normalized.includes(owner));
 }
 
-function matchCommitment(
-  extracted: StructuredCommitment,
-  expected: { who: string; action: string; type: string }
-): boolean {
+export function normalizeActionText(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/authoris(e|ed|ing)?/g, 'authoriz$1')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const ACTION_STOPWORDS = new Set([
+  'a',
+  'an',
+  'the',
+  'this',
+  'that',
+  'to',
+  'for',
+  'and',
+  'of',
+  'on',
+  'in',
+  'at',
+  'by',
+  'with',
+  'before',
+  'after',
+  'today',
+  'tomorrow',
+  'now',
+  'please',
+  'kindly',
+  'immediately',
+  'it',
+  'you',
+  'me',
+  'us',
+  'them',
+]);
+
+function extractActionTokens(text: string): string[] {
+  return normalizeActionText(text)
+    .split(' ')
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0 && !ACTION_STOPWORDS.has(token));
+}
+
+export function isTypeCompatible(expectedType: string, extractedType: string): boolean {
+  if (expectedType === extractedType) {
+    return true;
+  }
+
+  if (expectedType === 'owed_by_me') {
+    return ['commitment', 'delegation', 'follow_up'].includes(extractedType);
+  }
+
+  if (expectedType === 'waiting_on') {
+    return ['commitment', 'delegation', 'follow_up'].includes(extractedType);
+  }
+
+  return false;
+}
+
+export function matchCommitment(extracted: StructuredCommitment, expected: ExpectedCommitment): boolean {
   const extractedWho = (extracted.who ?? '').toLowerCase();
   const expectedWho = expected.who.toLowerCase();
 
-  // Owner name normalization: if expected is owner and extracted is any owner alias, match
-  const whoMatch = extractedWho.includes(expectedWho) ||
+  const whoMatch =
+    extractedWho.includes(expectedWho) ||
     (isOwnerName(expectedWho) && isOwnerName(extractedWho));
-  const actionMatch = extracted.owes_what?.toLowerCase().includes(expected.action.toLowerCase()) ?? false;
-  // Type matching: extraction types (commitment/delegation/follow_up) map to status (waiting_on/owed_by_me)
-  // so we match loosely here
-  const typeMatch = extracted.type === expected.type ||
-    (expected.type === 'owed_by_me' && ['commitment', 'delegation', 'follow_up'].includes(extracted.type)) ||
-    (expected.type === 'waiting_on' && ['commitment', 'delegation', 'follow_up'].includes(extracted.type));
-  return whoMatch && (actionMatch || typeMatch);
+
+  const normalizedExtractedAction = normalizeActionText(extracted.owes_what ?? '');
+  const normalizedExpectedAction = normalizeActionText(expected.action);
+  const exactActionMatch = normalizedExpectedAction.length > 0 && normalizedExtractedAction.includes(normalizedExpectedAction);
+
+  const expectedTokens = extractActionTokens(expected.action);
+  const extractedTokenSet = new Set(extractActionTokens(extracted.owes_what ?? ''));
+  const tokenCoverageMatch =
+    expectedTokens.length > 0 &&
+    expectedTokens.every((token) => extractedTokenSet.has(token));
+
+  const actionMatch = exactActionMatch || tokenCoverageMatch;
+
+  const typeMatch = isTypeCompatible(expected.type, extracted.type);
+
+  // Strict matching: actor + action + type compatibility must all pass.
+  return whoMatch && actionMatch && typeMatch;
 }
 
-async function runValidation() {
-  console.log('=== Action Brain E2E Live Validation ===\n');
-  console.log(`Gold set: ${GOLD_SET.length} messages, ${GOLD_SET.reduce((n, g) => n + g.expectedCommitments.length, 0)} expected commitments\n`);
+export async function loadGoldSet(path: string): Promise<GoldSetEntry[]> {
+  const raw = await readFile(path, 'utf8');
+  const parsed = JSON.parse(raw);
+
+  if (!Array.isArray(parsed)) {
+    throw new Error(`Gold set at ${path} must be a JSON array.`);
+  }
+
+  return parsed as GoldSetEntry[];
+}
+
+export async function runValidation(
+  goldSet: GoldSetEntry[],
+  options: RunValidationOptions = {}
+): Promise<ValidationSummary> {
+  console.log('=== Action Brain E2E Validation ===\n');
+  console.log(`Gold set: ${goldSet.length} messages, ${goldSet.reduce((n, g) => n + g.expectedCommitments.length, 0)} expected commitments\n`);
 
   let totalExpected = 0;
   let totalMatched = 0;
   let totalExtracted = 0;
   let totalFalsePositives = 0;
   let totalMissed = 0;
-  const results: string[] = [];
 
-  for (const entry of GOLD_SET) {
+  for (const entry of goldSet) {
     const { message, expectedCommitments } = entry;
 
     try {
       const extracted = await extractCommitments([message], {
-        ownerName: 'Abhinav Bansal',
-        ownerAliases: ['Abbhinaav', 'Abhi', 'Abhinav'],
+        ownerName: options.ownerName ?? 'Abhinav Bansal',
+        ownerAliases: options.ownerAliases ?? ['Abbhinaav', 'Abhi', 'Abhinav', 'Owner'],
       });
+
       totalExtracted += extracted.length;
       totalExpected += expectedCommitments.length;
 
-      // Match expected against extracted
       const matched = new Set<number>();
       const missedExpected: string[] = [];
 
-      for (const exp of expectedCommitments) {
+      for (const expected of expectedCommitments) {
         let found = false;
-        for (let i = 0; i < extracted.length; i++) {
-          if (!matched.has(i) && matchCommitment(extracted[i], exp)) {
+
+        for (let i = 0; i < extracted.length; i += 1) {
+          if (!matched.has(i) && matchCommitment(extracted[i], expected)) {
             matched.add(i);
             found = true;
-            totalMatched++;
+            totalMatched += 1;
             break;
           }
         }
+
         if (!found) {
-          missedExpected.push(`${exp.who}: ${exp.action} (${exp.type})`);
-          totalMissed++;
+          missedExpected.push(`${expected.who}: ${expected.action} (${expected.type})`);
+          totalMissed += 1;
         }
       }
 
-      const fps = extracted.length - matched.size;
-      totalFalsePositives += fps;
+      const falsePositives = extracted.length - matched.size;
+      totalFalsePositives += falsePositives;
 
-      const status = missedExpected.length === 0 && fps === 0 ? '✅' :
-                     missedExpected.length === 0 ? '⚠️' : '❌';
+      const status = missedExpected.length === 0 && falsePositives === 0
+        ? 'PASS'
+        : missedExpected.length === 0
+          ? 'WARN'
+          : 'FAIL';
 
-      const line = `${status} [${message.SenderName}] "${message.Text.substring(0, 60)}..."`;
-      console.log(line);
-      console.log(`   Expected: ${expectedCommitments.length} | Extracted: ${extracted.length} | Matched: ${matched.size} | FP: ${fps}`);
+      console.log(`[${status}] [${message.SenderName}] "${message.Text.substring(0, 60)}..."`);
+      console.log(`   Expected: ${expectedCommitments.length} | Extracted: ${extracted.length} | Matched: ${matched.size} | FP: ${falsePositives}`);
 
       if (missedExpected.length > 0) {
         console.log(`   MISSED: ${missedExpected.join(', ')}`);
       }
-      if (fps > 0) {
+
+      if (falsePositives > 0) {
         const unexpectedItems = extracted.filter((_, i) => !matched.has(i));
-        for (const u of unexpectedItems) {
-          console.log(`   UNEXPECTED: ${u.who}: ${u.owes_what} (${u.type}, conf=${u.confidence})`);
+        for (const item of unexpectedItems) {
+          console.log(`   UNEXPECTED: ${item.who}: ${item.owes_what} (${item.type}, conf=${item.confidence})`);
         }
       }
 
-      // Show all extractions for debugging
-      for (const e of extracted) {
-        console.log(`   → ${e.who} | ${e.owes_what} | ${e.type} | conf=${e.confidence} | src=${e.source_message_id}`);
-      }
       console.log();
-
-    } catch (err) {
-      console.log(`❌ [${message.SenderName}] ERROR: ${err}`);
-      totalMissed += expectedCommitments.length;
+    } catch (error) {
+      console.log(`[FAIL] [${message.SenderName}] ERROR: ${String(error)}`);
       totalExpected += expectedCommitments.length;
+      totalMissed += expectedCommitments.length;
       console.log();
     }
   }
 
-  // Summary
-  console.log('=== SUMMARY ===');
   const recall = totalExpected > 0 ? totalMatched / totalExpected : 0;
   const precision = totalExtracted > 0 ? totalMatched / totalExtracted : 0;
-  const f1 = precision + recall > 0 ? 2 * (precision * recall) / (precision + recall) : 0;
+  const f1 = precision + recall > 0 ? (2 * precision * recall) / (precision + recall) : 0;
 
+  const threshold = options.threshold ?? DEFAULT_THRESHOLD;
+  const passed = recall >= threshold;
+
+  console.log('=== SUMMARY ===');
   console.log(`Total expected: ${totalExpected}`);
   console.log(`Total extracted: ${totalExtracted}`);
   console.log(`Total matched: ${totalMatched}`);
@@ -293,8 +344,43 @@ async function runValidation() {
   console.log(`Recall: ${(recall * 100).toFixed(1)}%`);
   console.log(`Precision: ${(precision * 100).toFixed(1)}%`);
   console.log(`F1: ${(f1 * 100).toFixed(1)}%`);
-  console.log(`\nTarget: 90% recall`);
-  console.log(`Verdict: ${recall >= 0.9 ? '✅ PASS' : '❌ FAIL'}`);
+  console.log(`\nTarget: ${(threshold * 100).toFixed(1)}% recall`);
+  console.log(`Verdict: ${passed ? 'PASS' : 'FAIL'}`);
+
+  return {
+    totals: {
+      expected: totalExpected,
+      extracted: totalExtracted,
+      matched: totalMatched,
+      missed: totalMissed,
+      falsePositives: totalFalsePositives,
+    },
+    recall,
+    precision,
+    f1,
+    threshold,
+    passed,
+  };
 }
 
-runValidation().catch(console.error);
+async function main() {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.log('SKIP: ANTHROPIC_API_KEY is not set. Live extraction validation requires Anthropic credentials.');
+    return;
+  }
+
+  const goldSetPath = process.env.ACTION_BRAIN_LIVE_GOLDSET_PATH;
+  const goldSet = goldSetPath ? await loadGoldSet(goldSetPath) : DEFAULT_GOLD_SET;
+  const summary = await runValidation(goldSet);
+
+  if (!summary.passed) {
+    process.exitCode = 1;
+  }
+}
+
+if (import.meta.main) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}
