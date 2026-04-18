@@ -56,6 +56,12 @@ describe('Action Brain operation integration', () => {
     expect(names.has('action_ingest')).toBe(true);
   });
 
+  test('#26 action_ingest exposes owner context parameters for extraction', () => {
+    const actionIngest = getActionOperation('action_ingest');
+    expect(actionIngest.params.owner_name).toBeDefined();
+    expect(actionIngest.params.owner_aliases).toBeDefined();
+  });
+
   test('#23 mergeOperationSets fails fast on operation and CLI collisions', () => {
     expect(() =>
       mergeOperationSets([makeOperation('alpha', 'alpha-cmd')], [makeOperation('alpha', 'beta-cmd')])

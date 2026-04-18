@@ -402,4 +402,31 @@ describe('runCommitmentQualityGate', () => {
     expect(failedPrimaryCase?.missing.length).toBeGreaterThan(0);
     expect(failedPrimaryCase?.unexpected.length).toBeGreaterThan(0);
   });
+
+  test('#26 quality gate forwards owner context into extraction prompts', async () => {
+    const fakeClient = new FakeAnthropicClient(({ prompt }) => {
+      expect(prompt).toContain('You are extracting commitments for the owner: Abhinav Bansal.');
+      expect(prompt).toContain('The owner may also appear as: Abhi, Abbhinaav.');
+      return toolResponse([]);
+    });
+
+    const result = await runCommitmentQualityGate(
+      [
+        {
+          id: 'owner-context-case',
+          messages: [message('gold-owner-001', 'Please remind me to share the invoice tomorrow.')],
+          expected: [],
+        },
+      ],
+      {
+        client: fakeClient,
+        ownerName: 'Abhinav Bansal',
+        ownerAliases: ['Abhi', 'Abbhinaav'],
+        threshold: 1,
+      }
+    );
+
+    expect(result.escalated).toBe(false);
+    expect(fakeClient.calls.length).toBe(1);
+  });
 });

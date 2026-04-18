@@ -150,6 +150,12 @@ export const actionBrainOperations: Operation[] = [
       commitments: { type: 'array', description: 'Optional pre-extracted commitments (bypass LLM)', items: { type: 'object' } },
       model: { type: 'string', description: 'Anthropic model override' },
       timeout_ms: { type: 'number', description: 'Extractor timeout in milliseconds' },
+      owner_name: { type: 'string', description: 'Owner name used to resolve "you"/"from_me" references' },
+      owner_aliases: {
+        type: 'array',
+        description: 'Optional owner aliases used by extractor context',
+        items: { type: 'string' },
+      },
       actor: { type: 'string', description: 'Actor writing created events' },
     },
     mutating: true,
@@ -171,6 +177,8 @@ export const actionBrainOperations: Operation[] = [
           : await extractCommitments(messages, {
               model: asOptionalNonEmptyString(p.model) ?? undefined,
               timeoutMs: asOptionalNumber(p.timeout_ms) ?? undefined,
+              ownerName: asOptionalNonEmptyString(p.owner_name) ?? undefined,
+              ownerAliases: parseStringArrayParam(p.owner_aliases) ?? undefined,
             });
 
       if (ctx.dryRun) {
@@ -356,6 +364,13 @@ function parseJsonArrayInput(value: unknown): unknown[] {
   }
 
   return [];
+}
+
+function parseStringArrayParam(value: unknown): string[] | undefined {
+  const values = parseJsonArrayInput(value)
+    .map((entry) => asOptionalNonEmptyString(entry))
+    .filter((entry): entry is string => entry !== null);
+  return values.length > 0 ? values : undefined;
 }
 
 function resolveSourceMessage(messages: WhatsAppMessage[], commitment: StructuredCommitment): WhatsAppMessage | null {
