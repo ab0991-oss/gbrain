@@ -28,6 +28,29 @@ function getActionOperation(name: string): Operation {
   return operation;
 }
 
+async function withActionContext<T>(
+  fn: (ctx: OperationContext, engine: PGLiteEngine) => Promise<T>
+): Promise<T> {
+  const engine = new PGLiteEngine();
+  await engine.connect({ engine: 'pglite' } as any);
+
+  const ctx: OperationContext = {
+    engine,
+    config: { engine: 'pglite' } as any,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    dryRun: false,
+  };
+
+  // Ensure schema is initialized for each isolated test context.
+  await getActionOperation('action_list').handler(ctx, {});
+
+  try {
+    return await fn(ctx, engine);
+  } finally {
+    await engine.disconnect();
+  }
+}
+
 describe('Action Brain operation integration', () => {
   test('#22 registers Action Brain operations in the shared contract', () => {
     const names = new Set(operations.map((op) => op.name));
