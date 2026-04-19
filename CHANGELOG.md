@@ -2,6 +2,12 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.13.1] - 2026-04-20
+
+### Fixed
+
+- **Restored `minions` and `action-ingest-auto` CLI aliases.** Normalizes `gbrain minions <sub>` to `gbrain jobs <sub>` and `gbrain action-ingest-auto` to `gbrain action ingest` before help/dispatch routing, so existing cron jobs, scripts, and agent wake handlers keep working after the job-queue rename. Adds 4 regression tests covering alias resolution and help output.
+
 ## [0.13.0] - 2026-04-20
 
 ### Added
