@@ -2,6 +2,12 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.13.4] - 2026-04-20
+
+### Added
+
+- **Runtime failure counters in `action_ingest.run_summary`.** The extractor and ingest operation now emit stable `extraction_attempts`, `extraction_retries`, `extraction_low_confidence_drops`, `extraction_timeout_failures`, and `extraction_terminal_failures` counters alongside existing summary fields. Counters reflect runtime truth (incremented at the exact code path, not entry), distinguish retried transient failures from terminal failures, and surface through the path operators already read — no dashboard, no new metrics framework. Adds a `min_confidence` ingest parameter that drops low-confidence commitments before persistence and bumps the drop counter. Tests cover success, retry-then-success, retry-exhausted-timeout, terminal-non-timeout, and low-confidence drop paths to lock the key shape for downstream parsing. (GIT-174)
+
 ## [0.13.3] - 2026-04-20
 
 ### Added
