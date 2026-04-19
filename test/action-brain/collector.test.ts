@@ -488,6 +488,71 @@ describe('collectWacliMessages', () => {
     expect(existsSync(lockPath)).toBe(true);
   });
 
+  test('does not delete a competing fresh lock when stale reclaim loses the race', async () => {
+    const root = createTempDir();
+    const checkpointPath = join(root, 'wacli-checkpoint.json');
+    const lockPath = `${checkpointPath}.lock`;
+    const lockOwnerPath = join(lockPath, 'owner.json');
+    const previousDelay = process.env.ACTION_BRAIN_CHECKPOINT_LOCK_RECLAIM_DELAY_MS;
+
+    mkdirSync(lockPath, { recursive: true });
+    writeFileSync(
+      lockOwnerPath,
+      JSON.stringify({
+        owner_id: 'stale-owner',
+        pid: 999999,
+        acquired_at: '2020-01-01T00:00:00.000Z',
+      }),
+      'utf-8'
+    );
+
+    process.env.ACTION_BRAIN_CHECKPOINT_LOCK_RECLAIM_DELAY_MS = '150';
+    try {
+      let calls = 0;
+      const runner: WacliListMessagesRunner = async () => {
+        calls += 1;
+        return { success: true, data: { messages: [] }, error: null };
+      };
+
+      const collectPromise = collectWacliMessages({
+        checkpointPath,
+        stores: [{ key: 'personal', storePath: '/stores/personal' }],
+        now: new Date('2026-04-16T00:30:00.000Z'),
+        lockAcquireTimeoutMs: 220,
+        lockStaleAfterMs: 50,
+        runner,
+      });
+
+      await Bun.sleep(40);
+      rmSync(lockPath, { recursive: true, force: true });
+      mkdirSync(lockPath, { recursive: true });
+      writeFileSync(
+        lockOwnerPath,
+        JSON.stringify({
+          owner_id: 'fresh-owner',
+          pid: process.pid,
+          acquired_at: new Date().toISOString(),
+        }),
+        'utf-8'
+      );
+
+      const result = await collectPromise;
+
+      expect(calls).toBe(0);
+      expect(result.degraded).toBe(true);
+      expect(result.stores[0]?.degradedReason).toBe('checkpoint_read_failed');
+      expect(result.stores[0]?.error).toContain('Unable to acquire collector checkpoint lock');
+      expect(existsSync(lockPath)).toBe(true);
+      expect(readFileSync(lockOwnerPath, 'utf-8')).toContain('fresh-owner');
+    } finally {
+      if (previousDelay === undefined) {
+        delete process.env.ACTION_BRAIN_CHECKPOINT_LOCK_RECLAIM_DELAY_MS;
+      } else {
+        process.env.ACTION_BRAIN_CHECKPOINT_LOCK_RECLAIM_DELAY_MS = previousDelay;
+      }
+    }
+  });
+
   test('serializes overlapping collection runs across separate processes', async () => {
     const root = createTempDir();
     const checkpointPath = join(root, 'wacli-checkpoint.json');

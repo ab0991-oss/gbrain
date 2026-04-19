@@ -130,6 +130,13 @@ interface CheckpointLockOwner {
   acquired_at: string;
 }
 
+interface CheckpointLockReclaimCandidate {
+  token: string;
+  stale: boolean;
+}
+
+type CheckpointLockReclaimResult = 'not_stale' | 'lost_race' | 'reclaimed';
+
 class CheckpointLockAcquireTimeoutError extends Error {
   constructor(message: string) {
     super(message);
@@ -514,7 +521,10 @@ async function acquireCheckpointFileLock(
       if (!isAlreadyExistsError(err)) {
         throw err;
       }
-      await reclaimStaleCheckpointFileLock(lockPath, lockOptions.staleAfterMs);
+      const reclaimResult = await reclaimStaleCheckpointFileLock(lockPath, lockOptions.staleAfterMs);
+      if (reclaimResult === 'reclaimed') {
+        continue;
+      }
       if (Date.now() >= deadlineMs) {
         throw new CheckpointLockAcquireTimeoutError(
           `Unable to acquire collector checkpoint lock (${lockPath}) within ${lockOptions.acquireTimeoutMs}ms`
@@ -537,36 +547,94 @@ function checkpointLockOwnerPath(lockPath: string): string {
   return join(lockPath, CHECKPOINT_LOCK_OWNER_FILE_NAME);
 }
 
-async function reclaimStaleCheckpointFileLock(lockPath: string, staleAfterMs: number): Promise<void> {
-  if (!(await isCheckpointFileLockStale(lockPath, staleAfterMs))) {
-    return;
+async function reclaimStaleCheckpointFileLock(
+  lockPath: string,
+  staleAfterMs: number
+): Promise<CheckpointLockReclaimResult> {
+  const candidate = await checkpointLockReclaimCandidate(lockPath, staleAfterMs);
+  if (!candidate || !candidate.stale) {
+    return 'not_stale';
   }
-  await rm(lockPath, { recursive: true, force: true });
+
+  const reclaimDelayMs = checkpointLockReclaimDelayMs();
+  if (reclaimDelayMs > 0) {
+    await sleep(reclaimDelayMs);
+  }
+
+  const currentToken = await checkpointLockToken(lockPath);
+  if (!currentToken || currentToken !== candidate.token) {
+    return 'lost_race';
+  }
+
+  try {
+    await rm(lockPath, { recursive: true, force: false });
+    return 'reclaimed';
+  } catch (err) {
+    if (isFileNotFoundError(err)) {
+      return 'lost_race';
+    }
+    throw err;
+  }
 }
 
-async function isCheckpointFileLockStale(lockPath: string, staleAfterMs: number): Promise<boolean> {
+async function checkpointLockReclaimCandidate(
+  lockPath: string,
+  staleAfterMs: number
+): Promise<CheckpointLockReclaimCandidate | null> {
   const owner = await readCheckpointLockOwner(lockPath);
-  if (owner && isProcessAlive(owner.pid)) {
-    return false;
-  }
-
   const nowMs = Date.now();
+
   if (owner) {
+    const token = checkpointLockOwnerToken(owner);
+    if (isProcessAlive(owner.pid)) {
+      return { token, stale: false };
+    }
     const acquiredAtMs = Date.parse(owner.acquired_at);
     if (!Number.isNaN(acquiredAtMs)) {
-      return nowMs - acquiredAtMs >= staleAfterMs;
+      return {
+        token,
+        stale: nowMs - acquiredAtMs >= staleAfterMs,
+      };
     }
   }
 
   try {
     const lockStats = await stat(lockPath);
-    return nowMs - lockStats.mtimeMs >= staleAfterMs;
+    return {
+      token: checkpointLockLegacyToken(lockStats.ino, lockStats.mtimeMs),
+      stale: nowMs - lockStats.mtimeMs >= staleAfterMs,
+    };
   } catch (err) {
     if (isFileNotFoundError(err)) {
-      return false;
+      return null;
     }
     throw err;
   }
+}
+
+async function checkpointLockToken(lockPath: string): Promise<string | null> {
+  const owner = await readCheckpointLockOwner(lockPath);
+  if (owner) {
+    return checkpointLockOwnerToken(owner);
+  }
+
+  try {
+    const lockStats = await stat(lockPath);
+    return checkpointLockLegacyToken(lockStats.ino, lockStats.mtimeMs);
+  } catch (err) {
+    if (isFileNotFoundError(err)) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+function checkpointLockOwnerToken(owner: CheckpointLockOwner): string {
+  return `owner:${owner.owner_id}:${owner.acquired_at}`;
+}
+
+function checkpointLockLegacyToken(inode: number, mtimeMs: number): string {
+  return `legacy:${inode}:${Math.floor(mtimeMs)}`;
 }
 
 async function readCheckpointLockOwner(lockPath: string): Promise<CheckpointLockOwner | null> {
@@ -1056,6 +1124,14 @@ function normalizeLockAcquireTimeoutMs(value: number | undefined): number {
 function normalizeLockStaleAfterMs(value: number | undefined): number {
   if (!Number.isFinite(value) || value === undefined || value <= 0) {
     return DEFAULT_CHECKPOINT_LOCK_STALE_AFTER_MS;
+  }
+  return Math.floor(value);
+}
+
+function checkpointLockReclaimDelayMs(): number {
+  const value = Number(process.env.ACTION_BRAIN_CHECKPOINT_LOCK_RECLAIM_DELAY_MS ?? '0');
+  if (!Number.isFinite(value) || value <= 0) {
+    return 0;
   }
   return Math.floor(value);
 }
