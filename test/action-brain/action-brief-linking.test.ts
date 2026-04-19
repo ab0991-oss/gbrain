@@ -124,4 +124,69 @@ describe('action_brief entity linking', () => {
     expect(result.brief).toContain('source_contact=Ghost Person');
     expect(result.brief).not.toContain('source_contact=[Ghost Person](');
   });
+
+  test('keeps plain source_contact when entity match is ambiguous', async () => {
+    const ctx = await createActionContext();
+    const actionIngest = getActionOperation('action_ingest');
+    const actionBrief = getActionOperation('action_brief');
+
+    await engine!.putPage('people/joe', {
+      type: 'person',
+      title: 'Joe',
+      compiled_truth: 'Joe handles operations follow-ups.',
+      timeline: '',
+    });
+    await engine!.upsertChunks('people/joe', [
+      {
+        chunk_index: 0,
+        chunk_source: 'compiled_truth',
+        chunk_text: 'Joe handles operations follow-ups.',
+      },
+    ]);
+
+    await engine!.putPage('companies/joe', {
+      type: 'company',
+      title: 'Joe',
+      compiled_truth: 'Joe is a company that appears in operations notes.',
+      timeline: '',
+    });
+    await engine!.upsertChunks('companies/joe', [
+      {
+        chunk_index: 0,
+        chunk_source: 'compiled_truth',
+        chunk_text: 'Joe is a company that appears in operations notes.',
+      },
+    ]);
+
+    await actionIngest.handler(ctx, {
+      messages: [
+        {
+          ChatName: 'Operations',
+          SenderName: 'Joe',
+          Timestamp: '2026-04-16T08:00:00.000Z',
+          Text: 'Please send the final shipment docs.',
+          MsgID: 'm1',
+        },
+      ],
+      commitments: [
+        {
+          who: 'Joe',
+          owes_what: 'Send the final shipment docs',
+          to_whom: 'Abhi',
+          by_when: null,
+          confidence: 0.95,
+          type: 'commitment',
+          source_message_id: 'm1',
+        },
+      ],
+    });
+
+    const result = await actionBrief.handler(ctx, {
+      now: '2026-04-16T12:00:00.000Z',
+      last_sync_at: '2026-04-16T11:30:00.000Z',
+    });
+
+    expect(result.brief).toContain('source_contact=Joe');
+    expect(result.brief).not.toContain('source_contact=[Joe](');
+  });
 });
