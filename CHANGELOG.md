@@ -2,6 +2,14 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.13.0] - 2026-04-20
+
+Fork version cut on `ab0991-oss/gbrain:master`. Upstream `garrytan/gbrain` is at v0.12.3; this cut jumps past it so future fork releases and a planned upstream rebase never collide on version numbers. No behavioral changes ship in this release — the working `master` tree is byte-identical to v0.10.0 (last shipped feature set). Synced `VERSION` and `package.json` so `gbrain --version` reports `0.13.0` and the MCP/upgrade flow agrees.
+
+### Changed
+
+- **Fork versioning discipline.** From this release forward, fork-only work is numbered `0.13.x` and above. Sibling feature branches (wacli collector, auto-ingest runner, WA health checks, security hardening) will land as `0.13.1`..`0.13.N` in subsequent ship children of GIT-1035.
+
 ## [0.10.0] - 2026-04-16
 
 ### Added
