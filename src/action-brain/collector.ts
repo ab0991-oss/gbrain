@@ -12,6 +12,9 @@ const DEFAULT_STALE_AFTER_HOURS = 24;
 const CHECKPOINT_VERSION = 1;
 const MAX_IDS_AT_AFTER = 5000;
 const CHECKPOINT_LOCK_RETRY_MS = 25;
+const CHECKPOINT_LOCK_OWNER_FILE_NAME = 'owner.json';
+const DEFAULT_CHECKPOINT_LOCK_ACQUIRE_TIMEOUT_MS = 30_000;
+const DEFAULT_CHECKPOINT_LOCK_STALE_AFTER_MS = 5 * 60 * 1000;
 const checkpointLocks = new Map<string, Promise<void>>();
 
 export type WacliStoreKey = 'personal' | 'business' | string;
@@ -93,6 +96,8 @@ export interface CollectWacliMessagesOptions {
   staleAfterHours?: number;
   checkpointPath?: string;
   persistCheckpoint?: boolean;
+  lockAcquireTimeoutMs?: number;
+  lockStaleAfterMs?: number;
   now?: Date;
   runner?: WacliListMessagesRunner;
 }
@@ -114,6 +119,24 @@ interface WacliPayloadLike {
   error?: unknown;
 }
 
+interface CheckpointFileLockOptions {
+  acquireTimeoutMs: number;
+  staleAfterMs: number;
+}
+
+interface CheckpointLockOwner {
+  owner_id: string;
+  pid: number;
+  acquired_at: string;
+}
+
+class CheckpointLockAcquireTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CheckpointLockAcquireTimeoutError';
+  }
+}
+
 export async function collectWacliMessages(
   options: CollectWacliMessagesOptions = {}
 ): Promise<WacliCollectionResult> {
@@ -123,148 +146,160 @@ export async function collectWacliMessages(
   const staleAfterHours = normalizeStaleAfterHours(options.staleAfterHours);
   const checkpointPath = options.checkpointPath ?? defaultCollectorCheckpointPath();
   const persistCheckpoint = options.persistCheckpoint ?? true;
+  const lockAcquireTimeoutMs = normalizeLockAcquireTimeoutMs(options.lockAcquireTimeoutMs);
+  const lockStaleAfterMs = normalizeLockStaleAfterMs(options.lockStaleAfterMs);
   const runner = options.runner ?? runWacliMessagesList;
 
-  return withCheckpointLock(checkpointPath, async () => {
-    const checkpointRead = await readWacliCollectorCheckpointForCollect(checkpointPath);
-    const checkpoint = checkpointRead.checkpoint;
-    const nextCheckpoint: WacliCollectorCheckpointState = {
-      version: CHECKPOINT_VERSION,
-      stores: { ...checkpoint.stores },
-    };
+  try {
+    return await withCheckpointLock(
+      checkpointPath,
+      {
+        acquireTimeoutMs: lockAcquireTimeoutMs,
+        staleAfterMs: lockStaleAfterMs,
+      },
+      async () => {
+        const checkpointRead = await readWacliCollectorCheckpointForCollect(checkpointPath);
+        const checkpoint = checkpointRead.checkpoint;
+        const nextCheckpoint: WacliCollectorCheckpointState = {
+          version: CHECKPOINT_VERSION,
+          stores: { ...checkpoint.stores },
+        };
 
-    if (checkpointRead.error) {
-      const failedStores = stores.map((store) => ({
-        storeKey: store.key,
-        storePath: store.storePath,
-        checkpointBefore: null,
-        checkpointAfter: null,
-        batchSize: 0,
-        lastSyncAt: null,
-        degraded: true,
-        degradedReason: 'checkpoint_read_failed' as const,
-        error: checkpointRead.error,
-        messages: [],
-      }));
-      return {
-        collectedAt: now.toISOString(),
-        checkpointPath,
-        limit,
-        staleAfterHours,
-        stores: failedStores,
-        messages: [],
-        degraded: true,
-        checkpoint: nextCheckpoint,
-      };
-    }
-
-    const storeResults: WacliStoreCollectionResult[] = [];
-    const allMessages: CollectedWhatsAppMessage[] = [];
-    let checkpointDirty = false;
-
-    for (const store of stores) {
-      const existingCheckpoint = normalizeStoreCheckpoint(nextCheckpoint.stores[store.key]);
-      const checkpointBefore = existingCheckpoint.after;
-      let degradedReason: WacliDegradedReason | null = null;
-      let error: string | null = null;
-      let lastSyncAt: string | null = null;
-      let newMessages: CollectedWhatsAppMessage[] = [];
-
-      let incrementalPayload: unknown;
-      try {
-        incrementalPayload = await runner({
-          storePath: store.storePath,
-          after: existingCheckpoint.after,
-          limit,
-        });
-      } catch (err) {
-        degradedReason = 'command_failed';
-        error = errorMessage(err);
-      }
-
-      if (!degradedReason) {
-        const parsed = parseWacliListPayload(incrementalPayload, store);
-        if (!parsed.ok) {
-          degradedReason = parsed.degradedReason ?? 'invalid_payload';
-          error = parsed.error;
-        } else {
-          lastSyncAt = latestTimestamp(parsed.messages);
-          newMessages = filterMessagesAfterCheckpoint(parsed.messages, existingCheckpoint);
-        }
-      }
-
-      if (!degradedReason && !lastSyncAt) {
-        let latestPayload: unknown;
-        try {
-          latestPayload = await runner({
-            storePath: store.storePath,
-            after: null,
-            limit: 1,
+        if (checkpointRead.error) {
+          return checkpointFailureResult({
+            now,
+            stores,
+            checkpointPath,
+            limit,
+            staleAfterHours,
+            checkpoint: nextCheckpoint,
+            error: checkpointRead.error,
           });
-        } catch (err) {
-          degradedReason = 'command_failed';
-          error = errorMessage(err);
         }
 
-        if (!degradedReason) {
-          const latestParsed = parseWacliListPayload(latestPayload, store);
-          if (!latestParsed.ok) {
-            degradedReason = latestParsed.degradedReason ?? 'invalid_payload';
-            error = latestParsed.error;
-          } else {
-            lastSyncAt = latestTimestamp(latestParsed.messages);
+        const storeResults: WacliStoreCollectionResult[] = [];
+        const allMessages: CollectedWhatsAppMessage[] = [];
+        let checkpointDirty = false;
+
+        for (const store of stores) {
+          const existingCheckpoint = normalizeStoreCheckpoint(nextCheckpoint.stores[store.key]);
+          const checkpointBefore = existingCheckpoint.after;
+          let degradedReason: WacliDegradedReason | null = null;
+          let error: string | null = null;
+          let lastSyncAt: string | null = null;
+          let newMessages: CollectedWhatsAppMessage[] = [];
+
+          let incrementalPayload: unknown;
+          try {
+            incrementalPayload = await runner({
+              storePath: store.storePath,
+              after: existingCheckpoint.after,
+              limit,
+            });
+          } catch (err) {
+            degradedReason = 'command_failed';
+            error = errorMessage(err);
           }
+
+          if (!degradedReason) {
+            const parsed = parseWacliListPayload(incrementalPayload, store);
+            if (!parsed.ok) {
+              degradedReason = parsed.degradedReason ?? 'invalid_payload';
+              error = parsed.error;
+            } else {
+              lastSyncAt = latestTimestamp(parsed.messages);
+              newMessages = filterMessagesAfterCheckpoint(parsed.messages, existingCheckpoint);
+            }
+          }
+
+          if (!degradedReason && !lastSyncAt) {
+            let latestPayload: unknown;
+            try {
+              latestPayload = await runner({
+                storePath: store.storePath,
+                after: null,
+                limit: 1,
+              });
+            } catch (err) {
+              degradedReason = 'command_failed';
+              error = errorMessage(err);
+            }
+
+            if (!degradedReason) {
+              const latestParsed = parseWacliListPayload(latestPayload, store);
+              if (!latestParsed.ok) {
+                degradedReason = latestParsed.degradedReason ?? 'invalid_payload';
+                error = latestParsed.error;
+              } else {
+                lastSyncAt = latestTimestamp(latestParsed.messages);
+              }
+            }
+          }
+
+          if (!degradedReason) {
+            if (!lastSyncAt) {
+              degradedReason = 'last_sync_unknown';
+            } else if (isTimestampStale(lastSyncAt, now, staleAfterHours)) {
+              degradedReason = 'last_sync_stale';
+            }
+          }
+
+          const nextStoreCheckpoint = advanceCheckpoint(existingCheckpoint, newMessages, now);
+          if (!areStoreCheckpointsEqual(existingCheckpoint, nextStoreCheckpoint)) {
+            nextCheckpoint.stores[store.key] = nextStoreCheckpoint;
+            checkpointDirty = true;
+          } else if (!nextCheckpoint.stores[store.key]) {
+            nextCheckpoint.stores[store.key] = existingCheckpoint;
+          }
+
+          allMessages.push(...newMessages);
+          storeResults.push({
+            storeKey: store.key,
+            storePath: store.storePath,
+            checkpointBefore,
+            checkpointAfter: nextStoreCheckpoint.after,
+            batchSize: newMessages.length,
+            lastSyncAt,
+            degraded: degradedReason !== null,
+            degradedReason,
+            error,
+            messages: newMessages,
+          });
         }
-      }
 
-      if (!degradedReason) {
-        if (!lastSyncAt) {
-          degradedReason = 'last_sync_unknown';
-        } else if (isTimestampStale(lastSyncAt, now, staleAfterHours)) {
-          degradedReason = 'last_sync_stale';
+        allMessages.sort(sortMessagesByTimestampThenIdThenStore);
+
+        if (checkpointDirty && persistCheckpoint) {
+          await writeWacliCollectorCheckpoint(checkpointPath, nextCheckpoint);
         }
-      }
 
-      const nextStoreCheckpoint = advanceCheckpoint(existingCheckpoint, newMessages, now);
-      if (!areStoreCheckpointsEqual(existingCheckpoint, nextStoreCheckpoint)) {
-        nextCheckpoint.stores[store.key] = nextStoreCheckpoint;
-        checkpointDirty = true;
-      } else if (!nextCheckpoint.stores[store.key]) {
-        nextCheckpoint.stores[store.key] = existingCheckpoint;
+        return {
+          collectedAt: now.toISOString(),
+          checkpointPath,
+          limit,
+          staleAfterHours,
+          stores: storeResults,
+          messages: allMessages,
+          degraded: storeResults.some((store) => store.degraded),
+          checkpoint: nextCheckpoint,
+        };
       }
-
-      allMessages.push(...newMessages);
-      storeResults.push({
-        storeKey: store.key,
-        storePath: store.storePath,
-        checkpointBefore,
-        checkpointAfter: nextStoreCheckpoint.after,
-        batchSize: newMessages.length,
-        lastSyncAt,
-        degraded: degradedReason !== null,
-        degradedReason,
-        error,
-        messages: newMessages,
-      });
+    );
+  } catch (err) {
+    if (!(err instanceof CheckpointLockAcquireTimeoutError)) {
+      throw err;
     }
 
-    allMessages.sort(sortMessagesByTimestampThenIdThenStore);
-
-    if (checkpointDirty && persistCheckpoint) {
-      await writeWacliCollectorCheckpoint(checkpointPath, nextCheckpoint);
-    }
-
-    return {
-      collectedAt: now.toISOString(),
+    return checkpointFailureResult({
+      now,
+      stores,
       checkpointPath,
       limit,
       staleAfterHours,
-      stores: storeResults,
-      messages: allMessages,
-      degraded: storeResults.some((store) => store.degraded),
-      checkpoint: nextCheckpoint,
-    };
-  });
+      checkpoint: emptyCheckpointState(),
+      error: err.message,
+    });
+  }
 }
 
 export function summarizeWacliHealth(
@@ -413,10 +448,11 @@ export function defaultCollectorCheckpointPath(): string {
 
 async function withCheckpointLock<T>(
   checkpointPath: string,
+  lockOptions: CheckpointFileLockOptions,
   operation: () => Promise<T>
 ): Promise<T> {
   return withInProcessCheckpointLock(checkpointPath, async () => {
-    const releaseCrossProcessLock = await acquireCheckpointFileLock(checkpointPath);
+    const releaseCrossProcessLock = await acquireCheckpointFileLock(checkpointPath, lockOptions);
     try {
       return await operation();
     } finally {
@@ -449,23 +485,139 @@ async function withInProcessCheckpointLock<T>(
 }
 
 async function acquireCheckpointFileLock(
-  checkpointPath: string
+  checkpointPath: string,
+  lockOptions: CheckpointFileLockOptions
 ): Promise<() => Promise<void>> {
   const lockPath = `${checkpointPath}.lock`;
   await mkdir(dirname(checkpointPath), { recursive: true });
+  const lockOwnerPath = checkpointLockOwnerPath(lockPath);
+  const deadlineMs = Date.now() + lockOptions.acquireTimeoutMs;
 
   while (true) {
     try {
       await mkdir(lockPath);
-      return async () => {
+      const owner: CheckpointLockOwner = {
+        owner_id: randomUUID(),
+        pid: process.pid,
+        acquired_at: new Date().toISOString(),
+      };
+      try {
+        await writeFile(lockOwnerPath, `${JSON.stringify(owner)}\n`, 'utf-8');
+      } catch (writeErr) {
         await rm(lockPath, { recursive: true, force: true });
+        throw writeErr;
+      }
+      return async () => {
+        await releaseCheckpointFileLock(lockPath, owner.owner_id);
       };
     } catch (err) {
       if (!isAlreadyExistsError(err)) {
         throw err;
       }
+      await reclaimStaleCheckpointFileLock(lockPath, lockOptions.staleAfterMs);
+      if (Date.now() >= deadlineMs) {
+        throw new CheckpointLockAcquireTimeoutError(
+          `Unable to acquire collector checkpoint lock (${lockPath}) within ${lockOptions.acquireTimeoutMs}ms`
+        );
+      }
       await sleep(CHECKPOINT_LOCK_RETRY_MS);
     }
+  }
+}
+
+async function releaseCheckpointFileLock(lockPath: string, ownerId: string): Promise<void> {
+  const owner = await readCheckpointLockOwner(lockPath);
+  if (!owner || owner.owner_id !== ownerId) {
+    return;
+  }
+  await rm(lockPath, { recursive: true, force: true });
+}
+
+function checkpointLockOwnerPath(lockPath: string): string {
+  return join(lockPath, CHECKPOINT_LOCK_OWNER_FILE_NAME);
+}
+
+async function reclaimStaleCheckpointFileLock(lockPath: string, staleAfterMs: number): Promise<void> {
+  if (!(await isCheckpointFileLockStale(lockPath, staleAfterMs))) {
+    return;
+  }
+  await rm(lockPath, { recursive: true, force: true });
+}
+
+async function isCheckpointFileLockStale(lockPath: string, staleAfterMs: number): Promise<boolean> {
+  const owner = await readCheckpointLockOwner(lockPath);
+  if (owner && isProcessAlive(owner.pid)) {
+    return false;
+  }
+
+  const nowMs = Date.now();
+  if (owner) {
+    const acquiredAtMs = Date.parse(owner.acquired_at);
+    if (!Number.isNaN(acquiredAtMs)) {
+      return nowMs - acquiredAtMs >= staleAfterMs;
+    }
+  }
+
+  try {
+    const lockStats = await stat(lockPath);
+    return nowMs - lockStats.mtimeMs >= staleAfterMs;
+  } catch (err) {
+    if (isFileNotFoundError(err)) {
+      return false;
+    }
+    throw err;
+  }
+}
+
+async function readCheckpointLockOwner(lockPath: string): Promise<CheckpointLockOwner | null> {
+  try {
+    const raw = await readFile(checkpointLockOwnerPath(lockPath), 'utf-8');
+    return parseCheckpointLockOwner(raw);
+  } catch (err) {
+    if (isFileNotFoundError(err)) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+function parseCheckpointLockOwner(raw: string): CheckpointLockOwner | null {
+  try {
+    const parsed = JSON.parse(raw);
+    if (!isRecord(parsed)) {
+      return null;
+    }
+    const ownerId = asNonEmpty(parsed.owner_id);
+    const pid = typeof parsed.pid === 'number' ? parsed.pid : Number.NaN;
+    const acquiredAt = asNonEmpty(parsed.acquired_at);
+    if (!ownerId || !Number.isInteger(pid) || pid <= 0 || !acquiredAt) {
+      return null;
+    }
+    if (Number.isNaN(Date.parse(acquiredAt))) {
+      return null;
+    }
+    return {
+      owner_id: ownerId,
+      pid,
+      acquired_at: acquiredAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    if (isRecord(err) && (err.code === 'ESRCH' || err.code === 'ENOENT')) {
+      return false;
+    }
+    return true;
   }
 }
 
@@ -892,6 +1044,54 @@ function normalizeStaleAfterHours(value: number | undefined): number {
     return DEFAULT_STALE_AFTER_HOURS;
   }
   return value;
+}
+
+function normalizeLockAcquireTimeoutMs(value: number | undefined): number {
+  if (!Number.isFinite(value) || value === undefined || value < CHECKPOINT_LOCK_RETRY_MS) {
+    return DEFAULT_CHECKPOINT_LOCK_ACQUIRE_TIMEOUT_MS;
+  }
+  return Math.floor(value);
+}
+
+function normalizeLockStaleAfterMs(value: number | undefined): number {
+  if (!Number.isFinite(value) || value === undefined || value <= 0) {
+    return DEFAULT_CHECKPOINT_LOCK_STALE_AFTER_MS;
+  }
+  return Math.floor(value);
+}
+
+function checkpointFailureResult(params: {
+  now: Date;
+  stores: WacliStoreConfig[];
+  checkpointPath: string;
+  limit: number;
+  staleAfterHours: number;
+  checkpoint: WacliCollectorCheckpointState;
+  error: string;
+}): WacliCollectionResult {
+  const failedStores = params.stores.map((store) => ({
+    storeKey: store.key,
+    storePath: store.storePath,
+    checkpointBefore: null,
+    checkpointAfter: null,
+    batchSize: 0,
+    lastSyncAt: null,
+    degraded: true,
+    degradedReason: 'checkpoint_read_failed' as const,
+    error: params.error,
+    messages: [],
+  }));
+
+  return {
+    collectedAt: params.now.toISOString(),
+    checkpointPath: params.checkpointPath,
+    limit: params.limit,
+    staleAfterHours: params.staleAfterHours,
+    stores: failedStores,
+    messages: [],
+    degraded: true,
+    checkpoint: params.checkpoint,
+  };
 }
 
 function sleep(ms: number): Promise<void> {

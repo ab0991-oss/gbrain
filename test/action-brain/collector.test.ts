@@ -394,6 +394,100 @@ describe('collectWacliMessages', () => {
     expect(persisted.stores.personal?.message_ids_at_after).toEqual(['msg-1']);
   });
 
+  test('reclaims stale orphaned lock directory and continues collection', async () => {
+    const root = createTempDir();
+    const checkpointPath = join(root, 'wacli-checkpoint.json');
+    const lockPath = `${checkpointPath}.lock`;
+    const lockOwnerPath = join(lockPath, 'owner.json');
+
+    mkdirSync(lockPath, { recursive: true });
+    writeFileSync(
+      lockOwnerPath,
+      JSON.stringify({
+        owner_id: 'stale-owner',
+        pid: 999999,
+        acquired_at: '2020-01-01T00:00:00.000Z',
+      }),
+      'utf-8'
+    );
+
+    let calls = 0;
+    const runner: WacliListMessagesRunner = async () => {
+      calls += 1;
+      return {
+        success: true,
+        data: {
+          messages: [
+            {
+              MsgID: 'fresh-msg',
+              ChatName: 'Ops',
+              SenderJID: 'sender@jid',
+              Timestamp: '2026-04-16T00:29:00.000Z',
+              FromMe: false,
+              Text: 'fresh',
+            },
+          ],
+        },
+        error: null,
+      };
+    };
+
+    const result = await collectWacliMessages({
+      checkpointPath,
+      stores: [{ key: 'personal', storePath: '/stores/personal' }],
+      now: new Date('2026-04-16T00:30:00.000Z'),
+      limit: 50,
+      lockAcquireTimeoutMs: 1_000,
+      lockStaleAfterMs: 100,
+      runner,
+    });
+
+    expect(calls).toBe(1);
+    expect(result.degraded).toBe(false);
+    expect(result.messages.map((message) => message.MsgID)).toEqual(['fresh-msg']);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  test('fails closed when lock cannot be safely reclaimed before timeout', async () => {
+    const root = createTempDir();
+    const checkpointPath = join(root, 'wacli-checkpoint.json');
+    const lockPath = `${checkpointPath}.lock`;
+    const lockOwnerPath = join(lockPath, 'owner.json');
+
+    mkdirSync(lockPath, { recursive: true });
+    writeFileSync(
+      lockOwnerPath,
+      JSON.stringify({
+        owner_id: 'active-owner',
+        pid: process.pid,
+        acquired_at: new Date().toISOString(),
+      }),
+      'utf-8'
+    );
+
+    let calls = 0;
+    const runner: WacliListMessagesRunner = async () => {
+      calls += 1;
+      return { success: true, data: { messages: [] }, error: null };
+    };
+
+    const result = await collectWacliMessages({
+      checkpointPath,
+      stores: [{ key: 'personal', storePath: '/stores/personal' }],
+      now: new Date('2026-04-16T00:30:00.000Z'),
+      lockAcquireTimeoutMs: 150,
+      lockStaleAfterMs: 60_000,
+      runner,
+    });
+
+    expect(calls).toBe(0);
+    expect(result.degraded).toBe(true);
+    expect(result.stores[0]?.degraded).toBe(true);
+    expect(result.stores[0]?.degradedReason).toBe('checkpoint_read_failed');
+    expect(result.stores[0]?.error).toContain('Unable to acquire collector checkpoint lock');
+    expect(existsSync(lockPath)).toBe(true);
+  });
+
   test('serializes overlapping collection runs across separate processes', async () => {
     const root = createTempDir();
     const checkpointPath = join(root, 'wacli-checkpoint.json');
