@@ -239,8 +239,9 @@ const MAX_OWNER_NAME_LEN = 100;
 const MAX_ALIAS_LEN = 50;
 const MAX_ALIAS_COUNT = 10;
 
-function sanitizeOwnerString(value: string): string {
-  return value.replace(/[\r\n\0<>]/g, ' ').trim().slice(0, MAX_OWNER_NAME_LEN);
+function sanitizeOwnerString(value: string, maxLen = MAX_OWNER_NAME_LEN): string {
+  // Strip newlines, tabs, null bytes, control chars (U+0000–U+001F), and XML-significant chars.
+  return value.replace(/[\x00-\x1F<>]/g, ' ').trim().slice(0, maxLen);
 }
 
 function buildExtractionRequest(
@@ -252,7 +253,7 @@ function buildExtractionRequest(
   const safeName = ownerName ? sanitizeOwnerString(ownerName) : null;
   const safeAliases = ownerAliases
     .slice(0, MAX_ALIAS_COUNT)
-    .map((a) => sanitizeOwnerString(a).slice(0, MAX_ALIAS_LEN))
+    .map((a) => sanitizeOwnerString(a, MAX_ALIAS_LEN))
     .filter(Boolean);
 
   const ownerContext = safeName

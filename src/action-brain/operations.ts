@@ -150,7 +150,7 @@ export const actionBrainOperations: Operation[] = [
       commitments: { type: 'array', description: 'Optional pre-extracted commitments (bypass LLM)', items: { type: 'object' } },
       model: { type: 'string', description: 'Anthropic model override' },
       timeout_ms: { type: 'number', description: 'Extractor timeout in milliseconds' },
-      owner_name: { type: 'string', description: 'Owner name used to resolve "you"/"from_me" references', maxLength: 200 },
+      owner_name: { type: 'string', description: 'Owner name used to resolve "you"/"from_me" references', maxLength: 100 },
       owner_aliases: {
         type: 'array',
         description: 'Optional owner aliases used by extractor context (max 10)',

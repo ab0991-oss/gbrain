@@ -154,7 +154,7 @@ export function isOwnerName(name: string): boolean {
 export function normalizeActionText(text: string): string {
   return text
     .toLowerCase()
-    .replace(/authoris(e|ed|ing)?/g, 'authoriz$1')
+    .replace(/authoris(e|ed|ing)?/g, (_m, s) => (s ? 'authoriz' + s : 'authorize'))
     .replace(/[^a-z0-9\s]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
