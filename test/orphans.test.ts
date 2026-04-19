@@ -3,9 +3,11 @@ import {
   shouldExclude,
   deriveDomain,
   formatOrphansText,
+  findOrphans,
   type OrphanPage,
   type OrphanResult,
 } from '../src/commands/orphans.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
 
 // --- shouldExclude ---
 
@@ -199,5 +201,53 @@ describe('formatOrphansText', () => {
     };
     const out = formatOrphansText(result);
     expect(out).toContain('2 orphans out of 100 linkable pages (120 total; 20 excluded)');
+  });
+});
+
+describe('findOrphans', () => {
+  function makeEngine(rows: Array<{ slug: string; title: string; domain: string | null }>, totalPages: number): BrainEngine {
+    return {
+      async executeRaw<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+        if (sql.includes('FROM pages p') && sql.includes('FROM links l')) {
+          return rows as unknown as T[];
+        }
+        if (sql.includes('count(*)::int AS count FROM pages')) {
+          return [{ count: totalPages }] as unknown as T[];
+        }
+        throw new Error(`Unexpected SQL in test: ${sql}`);
+      },
+    } as unknown as BrainEngine;
+  }
+
+  test('uses engine queries and excludes pseudo-pages by default', async () => {
+    const engine = makeEngine(
+      [
+        { slug: '_atlas', title: '_atlas', domain: null },
+        { slug: 'companies/acme', title: 'Acme', domain: 'companies' },
+        { slug: 'people/alice', title: 'Alice', domain: null },
+      ],
+      6,
+    );
+
+    const result = await findOrphans(engine);
+    expect(result.total_orphans).toBe(2);
+    expect(result.total_pages).toBe(6);
+    expect(result.excluded).toBe(1);
+    expect(result.orphans.map(o => o.slug)).toEqual(['companies/acme', 'people/alice']);
+  });
+
+  test('includes pseudo-pages when includePseudo=true', async () => {
+    const engine = makeEngine(
+      [
+        { slug: '_atlas', title: '_atlas', domain: null },
+        { slug: 'companies/acme', title: 'Acme', domain: null },
+      ],
+      5,
+    );
+
+    const result = await findOrphans(engine, true);
+    expect(result.total_orphans).toBe(2);
+    expect(result.excluded).toBe(0);
+    expect(result.orphans.map(o => o.slug)).toEqual(['_atlas', 'companies/acme']);
   });
 });
