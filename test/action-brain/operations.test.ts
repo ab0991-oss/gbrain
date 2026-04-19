@@ -124,13 +124,15 @@ describe('Action Brain operation integration', () => {
       expect(firstRun.run_summary).toEqual({
         extraction_attempts: 0,
         extraction_retries: 0,
-        extraction_timeout_retries: 0,
+        extraction_low_confidence_drops: 0,
+        extraction_timeout_failures: 0,
         extraction_terminal_failures: 0,
       });
       expect(secondRun.run_summary).toEqual({
         extraction_attempts: 0,
         extraction_retries: 0,
-        extraction_timeout_retries: 0,
+        extraction_low_confidence_drops: 0,
+        extraction_timeout_failures: 0,
         extraction_terminal_failures: 0,
       });
 
@@ -246,6 +248,64 @@ describe('Action Brain operation integration', () => {
       expect(rows.rows[0].source_message_id).toMatch(/^m1:ab:/);
       expect(rows.rows[0].source_thread).toBe('Operations');
       expect(rows.rows[0].source_contact).toBe('Joe');
+    });
+
+    test('action_ingest reports low-confidence drops in run summary with stable keys', async () => {
+      const messages = [
+        { ChatName: 'Operations', SenderName: 'Joe', Timestamp: '2026-04-16T08:00:00.000Z', Text: 'Send docs', MsgID: 'm1' },
+      ];
+      const commitments = [
+        {
+          who: 'Joe',
+          owes_what: 'Low confidence task',
+          to_whom: 'Abhi',
+          by_when: null,
+          confidence: 0.49,
+          type: 'commitment',
+          source_message_id: 'm1',
+        },
+        {
+          who: 'Joe',
+          owes_what: 'High confidence task',
+          to_whom: 'Abhi',
+          by_when: null,
+          confidence: 0.95,
+          type: 'commitment',
+          source_message_id: 'm1',
+        },
+      ];
+
+      const result = await actionIngest.handler(ctx, {
+        messages,
+        commitments,
+        min_confidence: 0.8,
+      });
+
+      expect(Object.keys(result.run_summary)).toEqual([
+        'extraction_attempts',
+        'extraction_retries',
+        'extraction_low_confidence_drops',
+        'extraction_timeout_failures',
+        'extraction_terminal_failures',
+      ]);
+      expect(result.run_summary).toEqual({
+        extraction_attempts: 0,
+        extraction_retries: 0,
+        extraction_low_confidence_drops: 1,
+        extraction_timeout_failures: 0,
+        extraction_terminal_failures: 0,
+      });
+      expect(result.extracted_count).toBe(1);
+      expect(result.created_count).toBe(1);
+
+      const rows = await db.query(
+        `SELECT title, confidence
+         FROM action_items`
+      );
+
+      expect(rows.rows.length).toBe(1);
+      expect(rows.rows[0].title).toBe('High confidence task');
+      expect(rows.rows[0].confidence).toBe(0.95);
     });
   });
 });

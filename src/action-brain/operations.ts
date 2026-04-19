@@ -155,6 +155,10 @@ export const actionBrainOperations: Operation[] = [
       commitments: { type: 'array', description: 'Optional pre-extracted commitments (bypass LLM)', items: { type: 'object' } },
       model: { type: 'string', description: 'Anthropic model override' },
       timeout_ms: { type: 'number', description: 'Extractor timeout in milliseconds' },
+      min_confidence: {
+        type: 'number',
+        description: 'Drop extracted commitments below this confidence threshold (0-1, default: 0)',
+      },
       actor: { type: 'string', description: 'Actor writing created events' },
     },
     mutating: true,
@@ -171,6 +175,7 @@ export const actionBrainOperations: Operation[] = [
       }
 
       const runSummary = createEmptyExtractionRunSummary();
+      const minConfidence = clampConfidenceThreshold(asOptionalNumber(p.min_confidence));
       let extracted: StructuredCommitment[] = providedCommitments;
       if (providedCommitments.length === 0) {
         const extraction = await extractCommitmentsWithSummary(messages, {
@@ -180,6 +185,7 @@ export const actionBrainOperations: Operation[] = [
         });
         extracted = extraction.commitments;
       }
+      extracted = filterLowConfidenceCommitments(extracted, minConfidence, runSummary);
 
       if (ctx.dryRun) {
         return {
@@ -488,6 +494,33 @@ function clampConfidence(value: unknown): number {
     return 0.5;
   }
   return Math.min(1, Math.max(0, parsed));
+}
+
+function clampConfidenceThreshold(value: number | undefined): number {
+  if (value === undefined) {
+    return 0;
+  }
+  return Math.min(1, Math.max(0, value));
+}
+
+function filterLowConfidenceCommitments(
+  commitments: StructuredCommitment[],
+  minConfidence: number,
+  runSummary: { extraction_low_confidence_drops: number }
+): StructuredCommitment[] {
+  if (minConfidence <= 0) {
+    return commitments;
+  }
+
+  const filtered: StructuredCommitment[] = [];
+  for (const commitment of commitments) {
+    if (commitment.confidence < minConfidence) {
+      runSummary.extraction_low_confidence_drops += 1;
+      continue;
+    }
+    filtered.push(commitment);
+  }
+  return filtered;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

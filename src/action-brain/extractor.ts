@@ -45,7 +45,8 @@ export interface ExtractionRetryPolicy {
 export interface ExtractionRunSummary {
   extraction_attempts: number;
   extraction_retries: number;
-  extraction_timeout_retries: number;
+  extraction_low_confidence_drops: number;
+  extraction_timeout_failures: number;
   extraction_terminal_failures: number;
 }
 
@@ -182,14 +183,15 @@ export async function extractCommitmentsWithSummary(
       const rawCommitments = parseCommitmentsFromResponse(response);
       return { commitments: normalizeCommitments(rawCommitments), runSummary };
     } catch (err) {
+      if (isTimeoutLikeError(err)) {
+        runSummary.extraction_timeout_failures += 1;
+      }
+
       const retryable = isRetryableError(err);
       const canRetry = retryable && attempt < maxAttempts;
 
       if (canRetry) {
         runSummary.extraction_retries += 1;
-        if (isTimeoutLikeError(err)) {
-          runSummary.extraction_timeout_retries += 1;
-        }
 
         const delayMs = computeRetryDelayMs(attempt, retryPolicy);
         console.warn(
@@ -568,7 +570,8 @@ export function createEmptyExtractionRunSummary(): ExtractionRunSummary {
   return {
     extraction_attempts: 0,
     extraction_retries: 0,
-    extraction_timeout_retries: 0,
+    extraction_low_confidence_drops: 0,
+    extraction_timeout_failures: 0,
     extraction_terminal_failures: 0,
   };
 }
@@ -576,7 +579,8 @@ export function createEmptyExtractionRunSummary(): ExtractionRunSummary {
 function resetRunSummary(summary: ExtractionRunSummary): void {
   summary.extraction_attempts = 0;
   summary.extraction_retries = 0;
-  summary.extraction_timeout_retries = 0;
+  summary.extraction_low_confidence_drops = 0;
+  summary.extraction_timeout_failures = 0;
   summary.extraction_terminal_failures = 0;
 }
 
