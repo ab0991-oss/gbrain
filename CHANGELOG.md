@@ -2,6 +2,15 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.10.1] - 2026-04-19
+
+### Fixed
+
+- **Action Brain accurately resolves who "you" means in your messages.** Owner context (`owner_name`, `owner_aliases`) is now correctly threaded all the way through the quality gate, so the extractor evaluates accuracy against real owner identity — not a stripped-down version of the prompt.
+- **`action_ingest` accepts `owner_name` and `owner_aliases` over MCP.** You can now pass owner identity directly when calling `action_ingest`, letting the extractor know whose obligations to track in every batch.
+- **Injection-hardened owner context.** `owner_name` and `owner_aliases` are sanitized before reaching the LLM prompt — control characters, XML-significant chars stripped, length capped. Mis-formed owner strings can no longer inject instructions into the extraction context.
+- **Live validation harness ships with a sanitized gold set.** Real WhatsApp message content is no longer committed to the repository. Built-in gold set uses synthetic fixtures; real-message testing remains opt-in via `ACTION_BRAIN_LIVE_GOLDSET_PATH`.
+
 ## [0.10.0] - 2026-04-16
 
 ### Added
