@@ -34,6 +34,11 @@ Each durable role must set:
 
 The `workspaceStrategy` value is a declarative marker so future tooling can verify policy compliance.
 
+Only the CEO or the original agent creator may patch another agent's adapter config. Non-creator lane owners must either:
+
+- self-patch their own agent on their own heartbeat, or
+- request CEO action for cross-agent migration updates.
+
 ## Workflow Rules
 
 1. Do branch switches inside your own role worktree.
@@ -45,7 +50,7 @@ The `workspaceStrategy` value is a declarative marker so future tooling can veri
 
 1. Create `~/projects/gbrain-worktrees/<role>`.
 2. Create or attach a branch prefix contract for that role.
-3. Patch that agent's `adapterConfig.cwd` and set `adapterConfig.workspaceStrategy="per_agent_worktree"`.
+3. Patch that agent's `adapterConfig.cwd` and set `adapterConfig.workspaceStrategy="per_agent_worktree"` (self-patch or CEO/creator patch only).
 4. Update this document with the new topology row and branch prefix mapping.
 
 ## Escape Hatch
