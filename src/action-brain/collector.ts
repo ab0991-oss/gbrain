@@ -1,4 +1,5 @@
 import { execFile } from 'child_process';
+import { randomUUID } from 'crypto';
 import { mkdir, readFile, rename, unlink, writeFile } from 'fs/promises';
 import { homedir } from 'os';
 import { dirname, join } from 'path';
@@ -10,6 +11,7 @@ const DEFAULT_LIMIT = 200;
 const DEFAULT_STALE_AFTER_HOURS = 24;
 const CHECKPOINT_VERSION = 1;
 const MAX_IDS_AT_AFTER = 5000;
+const checkpointLocks = new Map<string, Promise<void>>();
 
 export type WacliStoreKey = 'personal' | 'business' | string;
 
@@ -122,80 +124,57 @@ export async function collectWacliMessages(
   const persistCheckpoint = options.persistCheckpoint ?? true;
   const runner = options.runner ?? runWacliMessagesList;
 
-  const checkpointRead = await readWacliCollectorCheckpointForCollect(checkpointPath);
-  const checkpoint = checkpointRead.checkpoint;
-  const nextCheckpoint: WacliCollectorCheckpointState = {
-    version: CHECKPOINT_VERSION,
-    stores: { ...checkpoint.stores },
-  };
-
-  if (checkpointRead.error) {
-    const failedStores = stores.map((store) => ({
-      storeKey: store.key,
-      storePath: store.storePath,
-      checkpointBefore: null,
-      checkpointAfter: null,
-      batchSize: 0,
-      lastSyncAt: null,
-      degraded: true,
-      degradedReason: 'checkpoint_read_failed' as const,
-      error: checkpointRead.error,
-      messages: [],
-    }));
-    return {
-      collectedAt: now.toISOString(),
-      checkpointPath,
-      limit,
-      staleAfterHours,
-      stores: failedStores,
-      messages: [],
-      degraded: true,
-      checkpoint: nextCheckpoint,
+  return withCheckpointLock(checkpointPath, async () => {
+    const checkpointRead = await readWacliCollectorCheckpointForCollect(checkpointPath);
+    const checkpoint = checkpointRead.checkpoint;
+    const nextCheckpoint: WacliCollectorCheckpointState = {
+      version: CHECKPOINT_VERSION,
+      stores: { ...checkpoint.stores },
     };
-  }
 
-  const storeResults: WacliStoreCollectionResult[] = [];
-  const allMessages: CollectedWhatsAppMessage[] = [];
-  let checkpointDirty = false;
-
-  for (const store of stores) {
-    const existingCheckpoint = normalizeStoreCheckpoint(nextCheckpoint.stores[store.key]);
-    const checkpointBefore = existingCheckpoint.after;
-    let degradedReason: WacliDegradedReason | null = null;
-    let error: string | null = null;
-    let lastSyncAt: string | null = null;
-    let newMessages: CollectedWhatsAppMessage[] = [];
-
-    let incrementalPayload: unknown;
-    try {
-      incrementalPayload = await runner({
+    if (checkpointRead.error) {
+      const failedStores = stores.map((store) => ({
+        storeKey: store.key,
         storePath: store.storePath,
-        after: existingCheckpoint.after,
+        checkpointBefore: null,
+        checkpointAfter: null,
+        batchSize: 0,
+        lastSyncAt: null,
+        degraded: true,
+        degradedReason: 'checkpoint_read_failed' as const,
+        error: checkpointRead.error,
+        messages: [],
+      }));
+      return {
+        collectedAt: now.toISOString(),
+        checkpointPath,
         limit,
-      });
-    } catch (err) {
-      degradedReason = 'command_failed';
-      error = errorMessage(err);
+        staleAfterHours,
+        stores: failedStores,
+        messages: [],
+        degraded: true,
+        checkpoint: nextCheckpoint,
+      };
     }
 
-    if (!degradedReason) {
-      const parsed = parseWacliListPayload(incrementalPayload, store);
-      if (!parsed.ok) {
-        degradedReason = parsed.degradedReason ?? 'invalid_payload';
-        error = parsed.error;
-      } else {
-        lastSyncAt = latestTimestamp(parsed.messages);
-        newMessages = filterMessagesAfterCheckpoint(parsed.messages, existingCheckpoint);
-      }
-    }
+    const storeResults: WacliStoreCollectionResult[] = [];
+    const allMessages: CollectedWhatsAppMessage[] = [];
+    let checkpointDirty = false;
 
-    if (!degradedReason && !lastSyncAt) {
-      let latestPayload: unknown;
+    for (const store of stores) {
+      const existingCheckpoint = normalizeStoreCheckpoint(nextCheckpoint.stores[store.key]);
+      const checkpointBefore = existingCheckpoint.after;
+      let degradedReason: WacliDegradedReason | null = null;
+      let error: string | null = null;
+      let lastSyncAt: string | null = null;
+      let newMessages: CollectedWhatsAppMessage[] = [];
+
+      let incrementalPayload: unknown;
       try {
-        latestPayload = await runner({
+        incrementalPayload = await runner({
           storePath: store.storePath,
-          after: null,
-          limit: 1,
+          after: existingCheckpoint.after,
+          limit,
         });
       } catch (err) {
         degradedReason = 'command_failed';
@@ -203,63 +182,88 @@ export async function collectWacliMessages(
       }
 
       if (!degradedReason) {
-        const latestParsed = parseWacliListPayload(latestPayload, store);
-        if (!latestParsed.ok) {
-          degradedReason = latestParsed.degradedReason ?? 'invalid_payload';
-          error = latestParsed.error;
+        const parsed = parseWacliListPayload(incrementalPayload, store);
+        if (!parsed.ok) {
+          degradedReason = parsed.degradedReason ?? 'invalid_payload';
+          error = parsed.error;
         } else {
-          lastSyncAt = latestTimestamp(latestParsed.messages);
+          lastSyncAt = latestTimestamp(parsed.messages);
+          newMessages = filterMessagesAfterCheckpoint(parsed.messages, existingCheckpoint);
         }
       }
-    }
 
-    if (!degradedReason) {
-      if (!lastSyncAt) {
-        degradedReason = 'last_sync_unknown';
-      } else if (isTimestampStale(lastSyncAt, now, staleAfterHours)) {
-        degradedReason = 'last_sync_stale';
+      if (!degradedReason && !lastSyncAt) {
+        let latestPayload: unknown;
+        try {
+          latestPayload = await runner({
+            storePath: store.storePath,
+            after: null,
+            limit: 1,
+          });
+        } catch (err) {
+          degradedReason = 'command_failed';
+          error = errorMessage(err);
+        }
+
+        if (!degradedReason) {
+          const latestParsed = parseWacliListPayload(latestPayload, store);
+          if (!latestParsed.ok) {
+            degradedReason = latestParsed.degradedReason ?? 'invalid_payload';
+            error = latestParsed.error;
+          } else {
+            lastSyncAt = latestTimestamp(latestParsed.messages);
+          }
+        }
       }
+
+      if (!degradedReason) {
+        if (!lastSyncAt) {
+          degradedReason = 'last_sync_unknown';
+        } else if (isTimestampStale(lastSyncAt, now, staleAfterHours)) {
+          degradedReason = 'last_sync_stale';
+        }
+      }
+
+      const nextStoreCheckpoint = advanceCheckpoint(existingCheckpoint, newMessages, now);
+      if (!areStoreCheckpointsEqual(existingCheckpoint, nextStoreCheckpoint)) {
+        nextCheckpoint.stores[store.key] = nextStoreCheckpoint;
+        checkpointDirty = true;
+      } else if (!nextCheckpoint.stores[store.key]) {
+        nextCheckpoint.stores[store.key] = existingCheckpoint;
+      }
+
+      allMessages.push(...newMessages);
+      storeResults.push({
+        storeKey: store.key,
+        storePath: store.storePath,
+        checkpointBefore,
+        checkpointAfter: nextStoreCheckpoint.after,
+        batchSize: newMessages.length,
+        lastSyncAt,
+        degraded: degradedReason !== null,
+        degradedReason,
+        error,
+        messages: newMessages,
+      });
     }
 
-    const nextStoreCheckpoint = advanceCheckpoint(existingCheckpoint, newMessages, now);
-    if (!areStoreCheckpointsEqual(existingCheckpoint, nextStoreCheckpoint)) {
-      nextCheckpoint.stores[store.key] = nextStoreCheckpoint;
-      checkpointDirty = true;
-    } else if (!nextCheckpoint.stores[store.key]) {
-      nextCheckpoint.stores[store.key] = existingCheckpoint;
+    allMessages.sort(sortMessagesByTimestampThenIdThenStore);
+
+    if (checkpointDirty && persistCheckpoint) {
+      await writeWacliCollectorCheckpoint(checkpointPath, nextCheckpoint);
     }
 
-    allMessages.push(...newMessages);
-    storeResults.push({
-      storeKey: store.key,
-      storePath: store.storePath,
-      checkpointBefore,
-      checkpointAfter: nextStoreCheckpoint.after,
-      batchSize: newMessages.length,
-      lastSyncAt,
-      degraded: degradedReason !== null,
-      degradedReason,
-      error,
-      messages: newMessages,
-    });
-  }
-
-  allMessages.sort(sortMessagesByTimestampThenIdThenStore);
-
-  if (checkpointDirty && persistCheckpoint) {
-    await writeWacliCollectorCheckpoint(checkpointPath, nextCheckpoint);
-  }
-
-  return {
-    collectedAt: now.toISOString(),
-    checkpointPath,
-    limit,
-    staleAfterHours,
-    stores: storeResults,
-    messages: allMessages,
-    degraded: storeResults.some((store) => store.degraded),
-    checkpoint: nextCheckpoint,
-  };
+    return {
+      collectedAt: now.toISOString(),
+      checkpointPath,
+      limit,
+      staleAfterHours,
+      stores: storeResults,
+      messages: allMessages,
+      degraded: storeResults.some((store) => store.degraded),
+      checkpoint: nextCheckpoint,
+    };
+  });
 }
 
 export function summarizeWacliHealth(
@@ -374,7 +378,7 @@ export async function writeWacliCollectorCheckpoint(
   } satisfies WacliCollectorCheckpointState;
 
   await mkdir(dirname(checkpointPath), { recursive: true });
-  const tmpPath = `${checkpointPath}.tmp-${process.pid}-${Date.now()}`;
+  const tmpPath = `${checkpointPath}.tmp-${process.pid}-${Date.now()}-${randomUUID()}`;
   await writeFile(tmpPath, `${JSON.stringify(normalized, null, 2)}\n`, 'utf-8');
   try {
     await rename(tmpPath, checkpointPath);
@@ -404,6 +408,29 @@ export function latestCheckpointSyncAt(checkpoint: WacliCollectorCheckpointState
 
 export function defaultCollectorCheckpointPath(): string {
   return join(homedir(), '.gbrain', 'action-brain', 'wacli-checkpoint.json');
+}
+
+async function withCheckpointLock<T>(
+  checkpointPath: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  const pendingLock = checkpointLocks.get(checkpointPath) ?? Promise.resolve();
+  let releaseCurrentLock: (() => void) | null = null;
+  const currentLock = new Promise<void>((resolve) => {
+    releaseCurrentLock = resolve;
+  });
+  const nextLock = pendingLock.then(() => currentLock);
+  checkpointLocks.set(checkpointPath, nextLock);
+
+  await pendingLock;
+  try {
+    return await operation();
+  } finally {
+    releaseCurrentLock?.();
+    if (checkpointLocks.get(checkpointPath) === nextLock) {
+      checkpointLocks.delete(checkpointPath);
+    }
+  }
 }
 
 async function runWacliMessagesList(request: WacliListRequest): Promise<unknown> {

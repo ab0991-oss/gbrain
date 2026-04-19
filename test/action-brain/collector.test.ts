@@ -83,6 +83,37 @@ describe('action-brain collector checkpoint storage', () => {
     expect(latestCheckpointSyncAt(checkpoint)).toBe('2026-04-16T05:00:00.000Z');
     expect(await readWacliCollectorLastSyncAt(checkpointPath)).toBe('2026-04-16T05:00:00.000Z');
   });
+
+  test('uses unique temp files for concurrent checkpoint writes in the same millisecond', async () => {
+    const root = createTempDir();
+    const checkpointPath = join(root, 'wacli-checkpoint.json');
+    const originalNow = Date.now;
+
+    Date.now = () => 1_760_000_000_000;
+    try {
+      await Promise.all(
+        Array.from({ length: 16 }, (_, i) =>
+          writeWacliCollectorCheckpoint(checkpointPath, {
+            version: 1,
+            stores: {
+              personal: {
+                after: `2026-04-16T05:00:${String(i).padStart(2, '0')}.000Z`,
+                message_ids_at_after: [`m-${i}`],
+                updated_at: `2026-04-16T05:01:${String(i).padStart(2, '0')}.000Z`,
+              },
+            },
+          })
+        )
+      );
+    } finally {
+      Date.now = originalNow;
+    }
+
+    const checkpoint = await readWacliCollectorCheckpoint(checkpointPath);
+    expect(checkpoint.version).toBe(1);
+    expect(checkpoint.stores.personal?.after).toMatch(/^2026-04-16T05:00:/);
+    expect(checkpoint.stores.personal?.message_ids_at_after.length).toBe(1);
+  });
 });
 
 describe('collectWacliMessages', () => {
@@ -253,6 +284,113 @@ describe('collectWacliMessages', () => {
     const stored = await readWacliCollectorCheckpoint(checkpointPath);
     expect(stored.stores.personal?.after).toBe('2026-04-16T00:00:00.000Z');
     expect(stored.stores.personal?.message_ids_at_after).toEqual(['a', 'b', 'c']);
+  });
+
+  test('serializes overlapping collection runs to prevent checkpoint rewind', async () => {
+    const root = createTempDir();
+    const checkpointPath = join(root, 'wacli-checkpoint.json');
+    const firstMessageTs = '2026-04-16T00:00:00.000Z';
+
+    let releaseFirstIncremental: (() => void) | null = null;
+    const firstIncrementalBlocked = new Promise<void>((resolve) => {
+      releaseFirstIncremental = resolve;
+    });
+    let markFirstIncrementalStarted: (() => void) | null = null;
+    const firstIncrementalStarted = new Promise<void>((resolve) => {
+      markFirstIncrementalStarted = resolve;
+    });
+
+    const incrementalAfters: Array<string | null> = [];
+    const runner: WacliListMessagesRunner = async (request) => {
+      if (request.storePath !== '/stores/personal') {
+        throw new Error(`unexpected store path: ${request.storePath}`);
+      }
+
+      if (request.limit === 50) {
+        incrementalAfters.push(request.after);
+
+        if (request.after === null) {
+          if (incrementalAfters.length === 1) {
+            markFirstIncrementalStarted?.();
+            await firstIncrementalBlocked;
+          }
+          return {
+            success: true,
+            data: {
+              messages: [
+                {
+                  MsgID: 'msg-1',
+                  ChatName: 'Ops',
+                  SenderJID: 'sender@jid',
+                  Timestamp: firstMessageTs,
+                  FromMe: false,
+                  Text: 'hello',
+                },
+              ],
+            },
+            error: null,
+          };
+        }
+
+        if (request.after === firstMessageTs) {
+          return { success: true, data: { messages: [] }, error: null };
+        }
+
+        throw new Error(`unexpected checkpoint cursor: ${request.after}`);
+      }
+
+      if (request.limit === 1) {
+        return {
+          success: true,
+          data: {
+            messages: [
+              {
+                MsgID: 'msg-1',
+                ChatName: 'Ops',
+                SenderJID: 'sender@jid',
+                Timestamp: firstMessageTs,
+                FromMe: false,
+                Text: 'hello',
+              },
+            ],
+          },
+          error: null,
+        };
+      }
+
+      throw new Error(`unexpected limit: ${request.limit}`);
+    };
+
+    const firstCollect = collectWacliMessages({
+      checkpointPath,
+      stores: [{ key: 'personal', storePath: '/stores/personal' }],
+      now: new Date('2026-04-16T00:30:00.000Z'),
+      limit: 50,
+      runner,
+    });
+
+    await firstIncrementalStarted;
+
+    const secondCollect = collectWacliMessages({
+      checkpointPath,
+      stores: [{ key: 'personal', storePath: '/stores/personal' }],
+      now: new Date('2026-04-16T00:30:00.000Z'),
+      limit: 50,
+      runner,
+    });
+
+    releaseFirstIncremental?.();
+
+    const [firstResult, secondResult] = await Promise.all([firstCollect, secondCollect]);
+
+    expect(incrementalAfters).toEqual([null, firstMessageTs]);
+    expect(firstResult.messages.map((message) => message.MsgID)).toEqual(['msg-1']);
+    expect(secondResult.messages).toEqual([]);
+    expect(secondResult.stores[0]?.checkpointBefore).toBe(firstMessageTs);
+
+    const persisted = await readWacliCollectorCheckpoint(checkpointPath);
+    expect(persisted.stores.personal?.after).toBe(firstMessageTs);
+    expect(persisted.stores.personal?.message_ids_at_after).toEqual(['msg-1']);
   });
 
   test('fails closed with explicit degraded checkpoint_read_failed state when checkpoint is invalid', async () => {
