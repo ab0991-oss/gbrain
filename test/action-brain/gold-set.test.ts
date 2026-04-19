@@ -52,7 +52,7 @@ interface FakeResponse {
   >;
 }
 
-const OWNER_ALIASES = ['abhinav bansal', 'abbhinaav', 'abhi', 'abhinav'];
+const OWNER_ALIASES = ['alex rivera', 'alex', 'ar'];
 const CHECKED_IN_GOLD_SET_PATH = resolve(import.meta.dir, 'fixtures/gold-set.jsonl');
 const PRIVATE_GOLD_SET_PATH = process.env.ACTION_BRAIN_PRIVATE_GOLD_SET_PATH;
 const EXTRACT_COMMITMENTS_TOOL = 'extract_commitments';
@@ -208,8 +208,8 @@ async function computeRecallMetrics(
   for (const row of rows) {
     const predicted = await extractCommitments(asExtractorMessages(row.message), {
       client: deterministicClient,
-      ownerName: 'Abhinav Bansal',
-      ownerAliases: ['Abbhinaav', 'Abhi', 'Abhinav'],
+      ownerName: 'Alex Rivera',
+      ownerAliases: ['Alex Rivera', 'Alex', 'AR'],
     });
 
     const matchedPredictedIndexes = new Set<number>();
