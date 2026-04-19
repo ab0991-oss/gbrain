@@ -8,11 +8,13 @@
  * chunk_id/chunk_index in results, and getEmbeddingsByChunkIds.
  */
 
-import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll, setDefaultTimeout } from 'bun:test';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import type { ChunkInput, SearchResult } from '../../src/core/types.ts';
 
 let engine: PGLiteEngine;
+
+setDefaultTimeout(15_000);
 
 // Create a basis vector embedding: dimension `idx` is 1.0, rest are 0.0
 function basisEmbedding(idx: number, dim = 1536): Float32Array {

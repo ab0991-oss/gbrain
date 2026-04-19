@@ -1,14 +1,19 @@
 import { execSync } from 'child_process';
-import { readdirSync, lstatSync } from 'fs';
-import { join } from 'path';
+import { readdirSync, lstatSync, existsSync, copyFileSync, mkdirSync, readFileSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { homedir } from 'os';
-import { saveConfig, type GBrainConfig } from '../core/config.ts';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+import { saveConfig, loadConfig, toEngineConfig, type GBrainConfig } from '../core/config.ts';
 import { createEngine } from '../core/engine-factory.ts';
 
 export async function runInit(args: string[]) {
   const isSupabase = args.includes('--supabase');
   const isPGLite = args.includes('--pglite');
   const isNonInteractive = args.includes('--non-interactive');
+  const isMigrateOnly = args.includes('--migrate-only');
   const jsonOutput = args.includes('--json');
   const urlIndex = args.indexOf('--url');
   const manualUrl = urlIndex !== -1 ? args[urlIndex + 1] : null;
@@ -16,6 +21,15 @@ export async function runInit(args: string[]) {
   const apiKey = keyIndex !== -1 ? args[keyIndex + 1] : null;
   const pathIndex = args.indexOf('--path');
   const customPath = pathIndex !== -1 ? args[pathIndex + 1] : null;
+
+  // Schema-only path: apply initSchema against the already-configured engine
+  // without ever calling saveConfig. Used by apply-migrations, the stopgap
+  // script, and the postinstall hook. Bare `gbrain init` defaults to PGLite
+  // and overwrites any existing Postgres config — we must never take that
+  // branch from a migration orchestrator.
+  if (isMigrateOnly) {
+    return initMigrateOnly({ jsonOutput });
+  }
 
   // Explicit PGLite mode
   if (isPGLite || (!isSupabase && !manualUrl && !isNonInteractive)) {
@@ -55,6 +69,39 @@ export async function runInit(args: string[]) {
   return initPostgres({ databaseUrl, jsonOutput, apiKey });
 }
 
+/**
+ * Apply the schema against the already-configured engine. No saveConfig.
+ * No PGLite fallback when no config exists. Used by migration orchestrators
+ * to bump an existing brain's schema to the latest version without
+ * clobbering the user's chosen engine.
+ */
+async function initMigrateOnly(opts: { jsonOutput: boolean }) {
+  const config = loadConfig();
+  if (!config) {
+    const msg = 'No brain configured. Run `gbrain init` (interactive) or `gbrain init --pglite` / `gbrain init --supabase` first.';
+    if (opts.jsonOutput) {
+      console.log(JSON.stringify({ status: 'error', reason: 'no_config', message: msg }));
+    } else {
+      console.error(msg);
+    }
+    process.exit(1);
+  }
+
+  const engine = await createEngine(toEngineConfig(config));
+  try {
+    await engine.connect(toEngineConfig(config));
+    await engine.initSchema();
+  } finally {
+    try { await engine.disconnect(); } catch { /* best-effort */ }
+  }
+
+  if (opts.jsonOutput) {
+    console.log(JSON.stringify({ status: 'success', engine: config.engine, mode: 'migrate-only' }));
+  } else {
+    console.log(`Schema up to date (engine: ${config.engine}).`);
+  }
+}
+
 async function initPGLite(opts: { jsonOutput: boolean; apiKey: string | null; customPath: string | null }) {
   const dbPath = opts.customPath || join(homedir(), '.gbrain', 'brain.pglite');
   console.log(`Setting up local brain with PGLite (no server needed)...`);
@@ -78,9 +125,18 @@ async function initPGLite(opts: { jsonOutput: boolean; apiKey: string | null; cu
   } else {
     console.log(`\nBrain ready at ${dbPath}`);
     console.log(`${stats.page_count} pages. Engine: PGLite (local Postgres).`);
-    console.log('Next: gbrain import <dir>');
+    if (stats.page_count > 0) {
+      console.log('');
+      console.log('Existing brain detected. To wire up the v0.10.3 knowledge graph:');
+      console.log('  gbrain extract links --source db        (typed link backfill)');
+      console.log('  gbrain extract timeline --source db     (structured timeline backfill)');
+      console.log('  gbrain stats                            (verify links > 0)');
+    } else {
+      console.log('Next: gbrain import <dir>');
+    }
     console.log('');
     console.log('When you outgrow local: gbrain migrate --to supabase');
+    reportModStatus();
   }
 }
 
@@ -149,7 +205,16 @@ async function initPostgres(opts: { databaseUrl: string; jsonOutput: boolean; ap
     console.log(JSON.stringify({ status: 'success', engine: 'postgres', pages: stats.page_count }));
   } else {
     console.log(`\nBrain ready. ${stats.page_count} pages. Engine: Postgres (Supabase).`);
-    console.log('Next: gbrain import <dir>');
+    if (stats.page_count > 0) {
+      console.log('');
+      console.log('Existing brain detected. To wire up the v0.10.3 knowledge graph:');
+      console.log('  gbrain extract links --source db        (typed link backfill)');
+      console.log('  gbrain extract timeline --source db     (structured timeline backfill)');
+      console.log('  gbrain stats                            (verify links > 0)');
+    } else {
+      console.log('Next: gbrain import <dir>');
+    }
+    reportModStatus();
   }
 }
 
@@ -215,4 +280,97 @@ function readLine(prompt: string): Promise<string> {
     });
     process.stdin.resume();
   });
+}
+
+/**
+ * Detect GStack installation across known host paths.
+ * Uses gstack-global-discover if available, falls back to path checking.
+ */
+export function detectGStack(): { found: boolean; path: string | null; host: string | null } {
+  // Try gstack's own discovery tool first (DRY: don't reimplement host detection)
+  try {
+    const result = execSync(
+      `${join(homedir(), '.claude', 'skills', 'gstack', 'bin', 'gstack-global-discover')} 2>/dev/null`,
+      { encoding: 'utf-8', timeout: 5000 }
+    ).trim();
+    if (result) {
+      return { found: true, path: result.split('\n')[0], host: 'auto-detected' };
+    }
+  } catch { /* binary not available */ }
+
+  // Fallback: check known host paths
+  const hostPaths = [
+    { path: join(homedir(), '.claude', 'skills', 'gstack'), host: 'claude' },
+    { path: join(homedir(), '.openclaw', 'skills', 'gstack'), host: 'openclaw' },
+    { path: join(homedir(), '.codex', 'skills', 'gstack'), host: 'codex' },
+    { path: join(homedir(), '.factory', 'skills', 'gstack'), host: 'factory' },
+    { path: join(homedir(), '.kiro', 'skills', 'gstack'), host: 'kiro' },
+  ];
+
+  for (const { path, host } of hostPaths) {
+    if (existsSync(join(path, 'SKILL.md')) || existsSync(join(path, 'setup'))) {
+      return { found: true, path, host };
+    }
+  }
+
+  return { found: false, path: null, host: null };
+}
+
+/**
+ * Install default identity templates (SOUL.md, USER.md, ACCESS_POLICY.md, HEARTBEAT.md)
+ * into the agent workspace. Uses minimal defaults, not the soul-audit interview.
+ */
+export function installDefaultTemplates(workspaceDir: string): string[] {
+  const gbrainRoot = dirname(dirname(__dirname)); // up from src/commands/ to repo root
+  const templatesDir = join(gbrainRoot, 'templates');
+  const installed: string[] = [];
+
+  const templates = [
+    { src: 'SOUL.md.template', dest: 'SOUL.md' },
+    { src: 'USER.md.template', dest: 'USER.md' },
+    { src: 'ACCESS_POLICY.md.template', dest: 'ACCESS_POLICY.md' },
+    { src: 'HEARTBEAT.md.template', dest: 'HEARTBEAT.md' },
+  ];
+
+  for (const { src, dest } of templates) {
+    const srcPath = join(templatesDir, src);
+    const destPath = join(workspaceDir, dest);
+    if (existsSync(srcPath) && !existsSync(destPath)) {
+      mkdirSync(dirname(destPath), { recursive: true });
+      copyFileSync(srcPath, destPath);
+      installed.push(dest);
+    }
+  }
+
+  return installed;
+}
+
+/**
+ * Report post-init status including GStack detection and skill count.
+ */
+export function reportModStatus(): void {
+  const gstack = detectGStack();
+  const gbrainRoot = dirname(dirname(__dirname));
+  const skillsDir = join(gbrainRoot, 'skills');
+
+  let skillCount = 0;
+  try {
+    const manifest = JSON.parse(
+      readFileSync(join(skillsDir, 'manifest.json'), 'utf-8')
+    );
+    skillCount = manifest.skills?.length || 0;
+  } catch { /* manifest not found */ }
+
+  console.log('');
+  console.log('--- GBrain Mod Status ---');
+  console.log(`Skills: ${skillCount} loaded`);
+  console.log(`GStack: ${gstack.found ? `found (${gstack.host})` : 'not found'}`);
+  if (!gstack.found) {
+    console.log('  Install GStack for coding skills:');
+    console.log('  git clone https://github.com/garrytan/gstack.git ~/.claude/skills/gstack');
+    console.log('  cd ~/.claude/skills/gstack && ./setup');
+  }
+  console.log('Resolver: skills/RESOLVER.md');
+  console.log('Soul audit: run `gbrain soul-audit` to customize agent identity');
+  console.log('');
 }
