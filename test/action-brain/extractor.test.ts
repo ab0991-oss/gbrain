@@ -247,7 +247,8 @@ describe('extractCommitments', () => {
     expect(runSummary).toEqual({
       extraction_attempts: 4,
       extraction_retries: 3,
-      extraction_timeout_retries: 3,
+      extraction_low_confidence_drops: 0,
+      extraction_timeout_failures: 3,
       extraction_terminal_failures: 0,
     });
   });
@@ -277,7 +278,32 @@ describe('extractCommitments', () => {
     expect(runSummary).toEqual({
       extraction_attempts: 4,
       extraction_retries: 3,
-      extraction_timeout_retries: 3,
+      extraction_low_confidence_drops: 0,
+      extraction_timeout_failures: 4,
+      extraction_terminal_failures: 1,
+    });
+  });
+
+  test('#28 distinguishes non-timeout terminal failures from timeout failures', async () => {
+    const fakeClient = new FakeAnthropicClient(() => {
+      const error = new Error('bad request');
+      (error as Error & { status?: number }).status = 400;
+      throw error;
+    });
+
+    const { commitments, runSummary } = await extractCommitmentsWithSummary(
+      [message('msg-028', 'This will fail hard.')],
+      {
+        client: fakeClient,
+      }
+    );
+
+    expect(commitments).toEqual([]);
+    expect(runSummary).toEqual({
+      extraction_attempts: 1,
+      extraction_retries: 0,
+      extraction_low_confidence_drops: 0,
+      extraction_timeout_failures: 0,
       extraction_terminal_failures: 1,
     });
   });
