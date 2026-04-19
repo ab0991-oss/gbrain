@@ -1,6 +1,6 @@
 import { execFile } from 'child_process';
 import { randomUUID } from 'crypto';
-import { mkdir, readFile, rename, unlink, writeFile } from 'fs/promises';
+import { mkdir, readFile, rename, rm, unlink, writeFile } from 'fs/promises';
 import { homedir } from 'os';
 import { dirname, join } from 'path';
 import { promisify } from 'util';
@@ -11,6 +11,7 @@ const DEFAULT_LIMIT = 200;
 const DEFAULT_STALE_AFTER_HOURS = 24;
 const CHECKPOINT_VERSION = 1;
 const MAX_IDS_AT_AFTER = 5000;
+const CHECKPOINT_LOCK_RETRY_MS = 25;
 const checkpointLocks = new Map<string, Promise<void>>();
 
 export type WacliStoreKey = 'personal' | 'business' | string;
@@ -414,6 +415,20 @@ async function withCheckpointLock<T>(
   checkpointPath: string,
   operation: () => Promise<T>
 ): Promise<T> {
+  return withInProcessCheckpointLock(checkpointPath, async () => {
+    const releaseCrossProcessLock = await acquireCheckpointFileLock(checkpointPath);
+    try {
+      return await operation();
+    } finally {
+      await releaseCrossProcessLock();
+    }
+  });
+}
+
+async function withInProcessCheckpointLock<T>(
+  checkpointPath: string,
+  operation: () => Promise<T>
+): Promise<T> {
   const pendingLock = checkpointLocks.get(checkpointPath) ?? Promise.resolve();
   let releaseCurrentLock: (() => void) | null = null;
   const currentLock = new Promise<void>((resolve) => {
@@ -429,6 +444,27 @@ async function withCheckpointLock<T>(
     releaseCurrentLock?.();
     if (checkpointLocks.get(checkpointPath) === nextLock) {
       checkpointLocks.delete(checkpointPath);
+    }
+  }
+}
+
+async function acquireCheckpointFileLock(
+  checkpointPath: string
+): Promise<() => Promise<void>> {
+  const lockPath = `${checkpointPath}.lock`;
+  await mkdir(dirname(checkpointPath), { recursive: true });
+
+  while (true) {
+    try {
+      await mkdir(lockPath);
+      return async () => {
+        await rm(lockPath, { recursive: true, force: true });
+      };
+    } catch (err) {
+      if (!isAlreadyExistsError(err)) {
+        throw err;
+      }
+      await sleep(CHECKPOINT_LOCK_RETRY_MS);
     }
   }
 }
@@ -647,13 +683,44 @@ function parseCheckpointStateStrict(raw: string): WacliCollectorCheckpointState 
       `checkpoint version ${version} is newer than supported version ${CHECKPOINT_VERSION}`
     );
   }
+  const storesRecord = isRecord(parsed.stores)
+    ? (parsed.stores as Record<string, unknown>)
+    : {};
+  for (const [storeKey, checkpoint] of Object.entries(storesRecord)) {
+    validateStoreCheckpointStrict(storeKey, checkpoint);
+  }
   const stores = normalizeCheckpointStores(
-    isRecord(parsed.stores) ? (parsed.stores as Record<string, WacliStoreCheckpoint>) : {}
+    storesRecord as Record<string, WacliStoreCheckpoint>
   );
   return {
     version,
     stores,
   };
+}
+
+function validateStoreCheckpointStrict(storeKey: string, checkpoint: unknown): void {
+  if (!isRecord(checkpoint)) {
+    throw new Error(`checkpoint store "${storeKey}" must be an object`);
+  }
+
+  if ('after' in checkpoint && checkpoint.after !== null && checkpoint.after !== undefined) {
+    if (normalizeTimestamp(checkpoint.after) === null) {
+      throw new Error(`checkpoint store "${storeKey}" has invalid "after" cursor`);
+    }
+  }
+
+  if ('message_ids_at_after' in checkpoint || 'ids' in checkpoint) {
+    const idsRaw = checkpoint.message_ids_at_after ?? checkpoint.ids;
+    if (!Array.isArray(idsRaw)) {
+      throw new Error(`checkpoint store "${storeKey}" has invalid "message_ids_at_after" cursor set`);
+    }
+
+    for (const id of idsRaw) {
+      if (asNonEmpty(id) === null) {
+        throw new Error(`checkpoint store "${storeKey}" has non-string message ID cursor`);
+      }
+    }
+  }
 }
 
 function emptyCheckpointState(): WacliCollectorCheckpointState {
@@ -816,11 +883,21 @@ function isFileNotFoundError(err: unknown): boolean {
   return isRecord(err) && err.code === 'ENOENT';
 }
 
+function isAlreadyExistsError(err: unknown): boolean {
+  return isRecord(err) && err.code === 'EEXIST';
+}
+
 function normalizeStaleAfterHours(value: number | undefined): number {
   if (!Number.isFinite(value) || value === undefined || value <= 0) {
     return DEFAULT_STALE_AFTER_HOURS;
   }
   return value;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function ensureDate(value: Date, field: string): Date {

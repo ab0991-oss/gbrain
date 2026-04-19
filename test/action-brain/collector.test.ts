@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'fs';
-import { join } from 'path';
+import { spawn } from 'child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
+import { join, resolve } from 'path';
 import {
   collectWacliMessages,
   latestCheckpointSyncAt,
@@ -393,6 +394,140 @@ describe('collectWacliMessages', () => {
     expect(persisted.stores.personal?.message_ids_at_after).toEqual(['msg-1']);
   });
 
+  test('serializes overlapping collection runs across separate processes', async () => {
+    const root = createTempDir();
+    const checkpointPath = join(root, 'wacli-checkpoint.json');
+    const firstMessageTs = '2026-04-16T00:00:00.000Z';
+    const storePath = '/stores/personal';
+    const binDir = join(root, 'bin');
+    const wacliPath = join(binDir, 'wacli');
+    const callsLogPath = join(root, 'wacli-calls.log');
+    const blockFlagPath = join(root, 'block-first');
+    const firstStartedPath = join(root, 'first-started');
+    const releasePath = join(root, 'release-first');
+    const workerPath = join(root, 'collect-worker.ts');
+    const collectorModulePath = resolve(process.cwd(), 'src/action-brain/collector.ts');
+
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(blockFlagPath, '1\n', 'utf-8');
+    writeFileSync(
+      wacliPath,
+      `#!/usr/bin/env bash
+set -euo pipefail
+after=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --after)
+      after="$2"
+      shift 2
+      ;;
+    --store|--limit)
+      shift 2
+      ;;
+    --json|messages|list)
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+printf '%s\\t%s\\n' "$$" "\${after:-<null>}" >> "\${WACLI_CALLS_LOG}"
+
+if [[ "\${ROLE:-}" == "first" && -z "\${after}" && -f "\${WACLI_BLOCK_FLAG_FILE}" ]]; then
+  : > "\${WACLI_FIRST_STARTED_FILE}"
+  while [[ ! -f "\${WACLI_RELEASE_FILE}" ]]; do
+    sleep 0.02
+  done
+fi
+
+if [[ -z "\${after}" ]]; then
+  cat <<'JSON'
+{"success":true,"data":{"messages":[{"MsgID":"msg-1","ChatName":"Ops","SenderJID":"sender@jid","Timestamp":"${firstMessageTs}","FromMe":false,"Text":"hello"}]},"error":null}
+JSON
+elif [[ "\${after}" == "${firstMessageTs}" ]]; then
+  cat <<'JSON'
+{"success":true,"data":{"messages":[{"MsgID":"msg-1","ChatName":"Ops","SenderJID":"sender@jid","Timestamp":"${firstMessageTs}","FromMe":false,"Text":"hello"}]},"error":null}
+JSON
+else
+  cat <<'JSON'
+{"success":true,"data":{"messages":[]},"error":null}
+JSON
+fi
+`,
+      'utf-8'
+    );
+    chmodSync(wacliPath, 0o755);
+
+    writeFileSync(
+      workerPath,
+      `import { collectWacliMessages } from '${collectorModulePath}';
+
+const checkpointPath = process.env.CHECKPOINT_PATH;
+const storePath = process.env.STORE_PATH;
+if (!checkpointPath || !storePath) {
+  throw new Error('missing CHECKPOINT_PATH or STORE_PATH');
+}
+
+const result = await collectWacliMessages({
+  checkpointPath,
+  stores: [{ key: 'personal', storePath }],
+  now: new Date('2026-04-16T00:30:00.000Z'),
+  limit: 50,
+});
+
+console.log(JSON.stringify({
+  messages: result.messages.map((message) => message.MsgID),
+  checkpointBefore: result.stores[0]?.checkpointBefore ?? null,
+}));
+`,
+      'utf-8'
+    );
+
+    const sharedEnv = {
+      CHECKPOINT_PATH: checkpointPath,
+      STORE_PATH: storePath,
+      WACLI_CALLS_LOG: callsLogPath,
+      WACLI_BLOCK_FLAG_FILE: blockFlagPath,
+      WACLI_FIRST_STARTED_FILE: firstStartedPath,
+      WACLI_RELEASE_FILE: releasePath,
+      PATH: `${binDir}:${process.env.PATH ?? ''}`,
+    };
+
+    const firstCollect = spawnCollectorWorker(workerPath, { ...sharedEnv, ROLE: 'first' });
+    await waitForFile(firstStartedPath, 5_000);
+
+    const secondCollect = spawnCollectorWorker(workerPath, { ...sharedEnv, ROLE: 'second' });
+    await Bun.sleep(150);
+
+    const inFlightCalls = readNonEmptyLines(callsLogPath);
+    expect(inFlightCalls).toHaveLength(1);
+    expect(inFlightCalls[0]?.split('\t')[1]).toBe('<null>');
+
+    writeFileSync(releasePath, '1\n', 'utf-8');
+
+    const [firstResult, secondResult] = await Promise.all([firstCollect, secondCollect]);
+    expect(firstResult.exitCode).toBe(0);
+    expect(secondResult.exitCode).toBe(0);
+
+    const callAfters = readNonEmptyLines(callsLogPath).map((line) => line.split('\t')[1]);
+    expect(callAfters).toEqual(['<null>', firstMessageTs]);
+
+    expect(JSON.parse(firstResult.stdout)).toEqual({
+      messages: ['msg-1'],
+      checkpointBefore: null,
+    });
+    expect(JSON.parse(secondResult.stdout)).toEqual({
+      messages: [],
+      checkpointBefore: firstMessageTs,
+    });
+
+    const persisted = await readWacliCollectorCheckpoint(checkpointPath);
+    expect(persisted.stores.personal?.after).toBe(firstMessageTs);
+    expect(persisted.stores.personal?.message_ids_at_after).toEqual(['msg-1']);
+  });
+
   test('fails closed with explicit degraded checkpoint_read_failed state when checkpoint is invalid', async () => {
     const root = createTempDir();
     const checkpointPath = join(root, 'wacli-checkpoint.json');
@@ -646,6 +781,78 @@ describe('collectWacliMessages', () => {
     expect(result.stores[0]?.error).toContain('newer than supported');
   });
 
+  test('rejects checkpoints whose per-store "after" cursor is malformed', async () => {
+    const root = createTempDir();
+    const checkpointPath = join(root, 'wacli-checkpoint.json');
+    await Bun.write(
+      checkpointPath,
+      JSON.stringify({
+        version: 1,
+        stores: {
+          personal: {
+            after: 'not-a-timestamp',
+            message_ids_at_after: ['m1'],
+            updated_at: null,
+          },
+        },
+      })
+    );
+
+    let calls = 0;
+    const runner: WacliListMessagesRunner = async () => {
+      calls += 1;
+      return { success: true, data: { messages: [] }, error: null };
+    };
+
+    const result = await collectWacliMessages({
+      checkpointPath,
+      stores: [{ key: 'personal', storePath: '/stores/personal' }],
+      now: new Date('2026-04-16T12:00:00.000Z'),
+      runner,
+    });
+
+    expect(calls).toBe(0);
+    expect(result.degraded).toBe(true);
+    expect(result.stores[0]?.degradedReason).toBe('checkpoint_read_failed');
+    expect(result.stores[0]?.error).toContain('invalid "after" cursor');
+  });
+
+  test('rejects checkpoints whose per-store message ID cursor set is malformed', async () => {
+    const root = createTempDir();
+    const checkpointPath = join(root, 'wacli-checkpoint.json');
+    await Bun.write(
+      checkpointPath,
+      JSON.stringify({
+        version: 1,
+        stores: {
+          personal: {
+            after: '2026-04-16T00:00:00.000Z',
+            message_ids_at_after: ['m1', 42],
+            updated_at: null,
+          },
+        },
+      })
+    );
+
+    let calls = 0;
+    const runner: WacliListMessagesRunner = async () => {
+      calls += 1;
+      return { success: true, data: { messages: [] }, error: null };
+    };
+
+    const result = await collectWacliMessages({
+      checkpointPath,
+      stores: [{ key: 'personal', storePath: '/stores/personal' }],
+      now: new Date('2026-04-16T12:00:00.000Z'),
+      runner,
+    });
+
+    expect(calls).toBe(0);
+    expect(result.degraded).toBe(true);
+    expect(result.stores[0]?.degradedReason).toBe('checkpoint_read_failed');
+    expect(result.stores[0]?.error).toContain('non-string message ID cursor');
+  });
+
   test('caps merged same-timestamp ID set to prevent unbounded growth', async () => {
     const root = createTempDir();
     const checkpointPath = join(root, 'wacli-checkpoint.json');
@@ -704,4 +911,63 @@ function createTempDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'action-brain-collector-test-'));
   tempDirs.push(dir);
   return dir;
+}
+
+interface WorkerRunResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+function spawnCollectorWorker(
+  workerPath: string,
+  env: Record<string, string>
+): Promise<WorkerRunResult> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(process.execPath, ['run', workerPath], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        ...env,
+      },
+    });
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      resolvePromise({
+        exitCode: code ?? -1,
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+      });
+    });
+  });
+}
+
+async function waitForFile(path: string, timeoutMs: number): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt <= timeoutMs) {
+    if (existsSync(path)) {
+      return;
+    }
+    await Bun.sleep(20);
+  }
+  throw new Error(`Timed out waiting for file: ${path}`);
+}
+
+function readNonEmptyLines(path: string): string[] {
+  if (!existsSync(path)) {
+    return [];
+  }
+  return readFileSync(path, 'utf-8')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
 }
