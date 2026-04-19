@@ -24,6 +24,7 @@ export interface SyncOpts {
   full?: boolean;
   noPull?: boolean;
   noEmbed?: boolean;
+  noExtract?: boolean;
 }
 
 function git(repoPath: string, ...args: string[]): string {
@@ -202,29 +203,29 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
     pagesAffected.push(newSlug);
   }
 
-  // Process adds and modifies
-  const useTransaction = (filtered.added.length + filtered.modified.length) > 10;
-  const processAddsModifies = async () => {
-    for (const path of [...filtered.added, ...filtered.modified]) {
-      const filePath = join(repoPath, path);
-      if (!existsSync(filePath)) continue;
-      try {
-        const result = await importFile(engine, filePath, path, { noEmbed });
-        if (result.status === 'imported') {
-          chunksCreated += result.chunks;
-          pagesAffected.push(result.slug);
-        }
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e);
-        console.error(`  Warning: skipped ${path}: ${msg}`);
+  // Process adds and modifies.
+  //
+  // NOTE: do NOT wrap this loop in engine.transaction(). importFromContent
+  // already opens its own inner transaction per file, and PGLite transactions
+  // are not reentrant — they acquire the same _runExclusiveTransaction mutex,
+  // so a nested call from inside a user callback queues forever on the mutex
+  // the outer transaction is still holding. Result: incremental sync hangs in
+  // ep_poll whenever the diff crosses the old > 10 threshold that used to
+  // trigger the outer wrap. Per-file atomicity is also the right granularity:
+  // one file's failure should not roll back the others' successful imports.
+  for (const path of [...filtered.added, ...filtered.modified]) {
+    const filePath = join(repoPath, path);
+    if (!existsSync(filePath)) continue;
+    try {
+      const result = await importFile(engine, filePath, path, { noEmbed });
+      if (result.status === 'imported') {
+        chunksCreated += result.chunks;
+        pagesAffected.push(result.slug);
       }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`  Warning: skipped ${path}: ${msg}`);
     }
-  };
-
-  if (useTransaction) {
-    await engine.transaction(async () => { await processAddsModifies(); });
-  } else {
-    await processAddsModifies();
   }
 
   const elapsed = Date.now() - start;
@@ -242,7 +243,25 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
     summary: `Sync: +${filtered.added.length} ~${filtered.modified.length} -${filtered.deleted.length} R${filtered.renamed.length}, ${chunksCreated} chunks, ${elapsed}ms`,
   });
 
-  if (noEmbed && totalChanges > 100) {
+  // Auto-extract links + timeline (always, extraction is cheap CPU)
+  if (!opts.noExtract && pagesAffected.length > 0) {
+    try {
+      const { extractLinksForSlugs, extractTimelineForSlugs } = await import('./extract.ts');
+      const linksCreated = await extractLinksForSlugs(engine, repoPath, pagesAffected);
+      const timelineCreated = await extractTimelineForSlugs(engine, repoPath, pagesAffected);
+      if (linksCreated > 0 || timelineCreated > 0) {
+        console.log(`  Extracted: ${linksCreated} links, ${timelineCreated} timeline entries`);
+      }
+    } catch { /* extraction is best-effort */ }
+  }
+
+  // Auto-embed (skip for large syncs — embedding calls OpenAI)
+  if (!noEmbed && pagesAffected.length > 0 && pagesAffected.length <= 100) {
+    try {
+      const { runEmbed } = await import('./embed.ts');
+      await runEmbed(engine, ['--slugs', ...pagesAffected]);
+    } catch { /* embedding is best-effort */ }
+  } else if (noEmbed || totalChanges > 100) {
     console.log(`Text imported. Run 'gbrain embed --stale' to generate embeddings.`);
   }
 
@@ -270,6 +289,19 @@ async function performFullSync(
   const importArgs = [repoPath];
   if (opts.noEmbed) importArgs.push('--no-embed');
   await runImport(engine, importArgs);
+
+  // Persist sync state so next sync is incremental (C1 fix: was missing)
+  await engine.setConfig('sync.last_commit', headCommit);
+  await engine.setConfig('sync.last_run', new Date().toISOString());
+  await engine.setConfig('sync.repo_path', repoPath);
+
+  // Full sync doesn't track pagesAffected, so fall back to embed --stale
+  if (!opts.noEmbed) {
+    try {
+      const { runEmbed } = await import('./embed.ts');
+      await runEmbed(engine, ['--stale']);
+    } catch { /* embedding is best-effort */ }
+  }
 
   return {
     status: 'first_sync',
