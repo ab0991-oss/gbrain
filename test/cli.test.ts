@@ -60,6 +60,41 @@ describe('ask alias', () => {
   });
 });
 
+describe('compatibility aliases', () => {
+  test('minions alias maps to jobs in source', () => {
+    expect(cliSource).toContain("if (command === 'minions')");
+    expect(cliSource).toContain("command = 'jobs'");
+  });
+
+  test('action-ingest-auto alias maps to action-ingest in source', () => {
+    expect(cliSource).toContain("if (command === 'action-ingest-auto')");
+    expect(cliSource).toContain("command = 'action-ingest'");
+  });
+
+  test('action-ingest-auto --help resolves to action ingest usage', async () => {
+    const proc = Bun.spawn(['bun', 'run', 'src/cli.ts', 'action-ingest-auto', '--help'], {
+      cwd: new URL('..', import.meta.url).pathname,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const stdout = await new Response(proc.stdout).text();
+    const exitCode = await proc.exited;
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain('Usage: gbrain action ingest');
+  });
+
+  test('minions alias is recognized by parser (not unknown-command path)', async () => {
+    const proc = Bun.spawn(['bun', 'run', 'src/cli.ts', 'minions', '--help'], {
+      cwd: new URL('..', import.meta.url).pathname,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const stderr = await new Response(proc.stderr).text();
+    await proc.exited;
+    expect(stderr).not.toContain('Unknown command: minions');
+  });
+});
+
 describe('CLI dispatch integration', () => {
   test('--version outputs version', async () => {
     const proc = Bun.spawn(['bun', 'run', 'src/cli.ts', '--version'], {

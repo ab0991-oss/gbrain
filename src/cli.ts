@@ -99,6 +99,14 @@ async function main() {
   if (command === 'ask') {
     command = 'query';
   }
+  // Back-compat alias: pre-rename command surface used `minions`.
+  if (command === 'minions') {
+    command = 'jobs';
+  }
+  // Back-compat alias used in acceptance/golden-path scripts.
+  if (command === 'action-ingest-auto') {
+    command = 'action-ingest';
+  }
 
   // Per-command --help
   if (subArgs.includes('--help') || subArgs.includes('-h')) {
