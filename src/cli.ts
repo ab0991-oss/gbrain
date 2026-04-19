@@ -46,6 +46,8 @@ const CLI_ONLY = new Set([
   'jobs',
   'apply-migrations',
   'skillpack-check',
+  'resolvers',
+  'integrity',
   'repair-jsonb',
   'orphans',
 ]);
@@ -386,6 +388,16 @@ async function handleCliOnly(command: string, args: string[]) {
   if (command === 'report') {
     const { runReport } = await import('./commands/report.ts');
     await runReport(args);
+    return;
+  }
+  if (command === 'resolvers') {
+    const { runResolvers } = await import('./commands/resolvers.ts');
+    await runResolvers(args);
+    return;
+  }
+  if (command === 'integrity') {
+    const { runIntegrity } = await import('./commands/integrity.ts');
+    await runIntegrity(args);
     return;
   }
   if (command === 'apply-migrations') {
