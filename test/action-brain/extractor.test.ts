@@ -819,6 +819,35 @@ describe('runCommitmentQualityGate', () => {
     }
   });
 
+  test('quality gate sanitizes owner context before prompt interpolation', async () => {
+    const fakeClient = new FakeAnthropicClient(({ prompt }) => {
+      const msgId = extractMsgId(prompt);
+      return toolResponse(canonicalByMsgId.get(msgId) ?? []);
+    });
+
+    const longOwnerName = `${'A'.repeat(120)}\n<owner>`;
+    const ownerAliases = Array.from({ length: 12 }, (_unused, index) => `alias-${index}-value-with-control-\x00<>`);
+    await runCommitmentQualityGate(goldSet, {
+      client: fakeClient,
+      ownerName: longOwnerName,
+      ownerAliases,
+      threshold: 0.8,
+    });
+
+    expect(fakeClient.calls.length).toBe(10);
+    const prompt = fakeClient.calls[0]?.prompt ?? '';
+    const ownerLine = prompt.split('\n').find((line) => line.startsWith('You are extracting commitments for the owner:')) ?? '';
+    const aliasLine = prompt.split('\n').find((line) => line.startsWith('The owner may also appear as:')) ?? '';
+    expect(prompt).toContain(`You are extracting commitments for the owner: ${'A'.repeat(100)}.`);
+    expect(prompt).toContain('alias-0-value-with-control');
+    expect(prompt).not.toContain('alias-10-value-with-control');
+    expect(ownerLine).not.toContain('<');
+    expect(ownerLine).not.toContain('>');
+    expect(aliasLine).not.toContain('<');
+    expect(aliasLine).not.toContain('>');
+    expect(aliasLine).not.toContain('\x00');
+  });
+
   test('#25 quality gate reports per-case mismatch details for reviewability', async () => {
     const fakeClient = new FakeAnthropicClient(({ model, prompt }) => {
       const msgId = extractMsgId(prompt);

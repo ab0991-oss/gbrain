@@ -3,9 +3,12 @@ import { ActionEngine } from './action-engine.ts';
 import {
   collectWacliMessages,
   defaultCollectorCheckpointPath,
+  readWacliCollectorCheckpoint,
   summarizeWacliHealth,
   type CollectWacliMessagesOptions,
+  type WacliCollectorCheckpointState,
   type WacliCollectionResult,
+  type WacliStoreCheckpoint,
   type WacliHealthStatus,
   type WacliStoreCollectionResult,
   writeWacliCollectorCheckpoint,
@@ -13,6 +16,7 @@ import {
 import { extractCommitments, type StructuredCommitment } from './extractor.ts';
 import { initActionSchema } from './action-schema.ts';
 import {
+  buildSourceMessageIndex,
   resolveSourceMessage as resolveStoreQualifiedSourceMessage,
   resolveSourceMessageId as resolveStoreQualifiedSourceMessageId,
 } from './source-identity.ts';
@@ -154,11 +158,12 @@ export async function runActionIngest(options: RunActionIngestOptions): Promise<
 
   const engine = new ActionEngine(options.db);
   const sourceOrdinalByMessageId = new Map<string, number>();
+  const sourceMessageIndex = buildSourceMessageIndex(collection.messages);
   try {
     for (const commitment of commitments) {
-      const sourceMessage = resolveStoreQualifiedSourceMessage(collection.messages, commitment);
+      const sourceMessage = resolveStoreQualifiedSourceMessage(collection.messages, commitment, sourceMessageIndex);
       const sourceMessageId = buildCommitmentSourceId(
-        resolveStoreQualifiedSourceMessageId(collection.messages, commitment, sourceMessage),
+        resolveStoreQualifiedSourceMessageId(collection.messages, commitment, sourceMessage, sourceMessageIndex),
         commitment,
         sourceOrdinalByMessageId
       );
@@ -195,9 +200,8 @@ export async function runActionIngest(options: RunActionIngestOptions): Promise<
     return summary;
   }
 
-  // Only write the checkpoint file if at least one store advanced its cursor. Avoids redundant
-  // writes on empty incremental polls and keeps the checkpoint file as a reliable "something changed" signal.
-  const shouldPersistCheckpoint = collection.stores.some((store) => store.checkpointBefore !== store.checkpointAfter);
+  const existingCheckpoint = await readWacliCollectorCheckpoint(collection.checkpointPath);
+  const shouldPersistCheckpoint = !areCheckpointStatesEqual(existingCheckpoint, collection.checkpoint);
   if (!shouldPersistCheckpoint) {
     summary.success = true;
     return summary;
@@ -307,4 +311,48 @@ function errorMessage(err: unknown): string {
     return err;
   }
   return JSON.stringify(err);
+}
+
+function areCheckpointStatesEqual(
+  a: WacliCollectorCheckpointState,
+  b: WacliCollectorCheckpointState
+): boolean {
+  if (a.version !== b.version) {
+    return false;
+  }
+
+  const aStores = Object.keys(a.stores).sort();
+  const bStores = Object.keys(b.stores).sort();
+  if (aStores.length !== bStores.length) {
+    return false;
+  }
+
+  for (let i = 0; i < aStores.length; i += 1) {
+    const key = aStores[i];
+    if (key !== bStores[i]) {
+      return false;
+    }
+    const aStore = a.stores[key];
+    const bStore = b.stores[key];
+    if (!aStore || !bStore || !areStoreCheckpointsEqual(aStore, bStore)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function areStoreCheckpointsEqual(a: WacliStoreCheckpoint, b: WacliStoreCheckpoint): boolean {
+  if (a.after !== b.after || a.updated_at !== b.updated_at) {
+    return false;
+  }
+  if (a.message_ids_at_after.length !== b.message_ids_at_after.length) {
+    return false;
+  }
+  for (let i = 0; i < a.message_ids_at_after.length; i += 1) {
+    if (a.message_ids_at_after[i] !== b.message_ids_at_after[i]) {
+      return false;
+    }
+  }
+  return true;
 }

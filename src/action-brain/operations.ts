@@ -12,6 +12,7 @@ import { extractCommitments, type StructuredCommitment, type WhatsAppMessage } f
 import { runActionIngest } from './ingest-runner.ts';
 import { initActionSchema } from './action-schema.ts';
 import {
+  buildSourceMessageIndex,
   resolveSourceMessage as resolveStoreQualifiedSourceMessage,
   resolveSourceMessageId as resolveStoreQualifiedSourceMessageId,
 } from './source-identity.ts';
@@ -180,7 +181,7 @@ export const actionBrainOperations: Operation[] = [
       owner_aliases: {
         type: 'array',
         description: 'Optional owner aliases used by extractor context (max 10)',
-        items: { type: 'string', maxLength: 100 },
+        items: { type: 'string', maxLength: 50 },
         maxItems: 10,
       },
       actor: { type: 'string', description: 'Actor writing created events' },
@@ -204,6 +205,8 @@ export const actionBrainOperations: Operation[] = [
           : await extractCommitments(messages, {
               model: asOptionalNonEmptyString(p.model) ?? undefined,
               timeoutMs: asOptionalNumber(p.timeout_ms) ?? undefined,
+              ownerName: asOptionalNonEmptyString(p.owner_name) ?? undefined,
+              ownerAliases: parseStringArrayParam(p.owner_aliases),
             });
 
       if (ctx.dryRun) {
@@ -215,13 +218,14 @@ export const actionBrainOperations: Operation[] = [
       }
 
       const sourceOrdinalByMessageId = new Map<string, number>();
+      const sourceMessageIndex = buildSourceMessageIndex(messages);
       const items = [];
       let createdCount = 0;
       for (let i = 0; i < extracted.length; i += 1) {
         const commitment = extracted[i];
-        const message = resolveStoreQualifiedSourceMessage(messages, commitment);
+        const message = resolveStoreQualifiedSourceMessage(messages, commitment, sourceMessageIndex);
         const sourceMessageId = buildCommitmentSourceId(
-          resolveStoreQualifiedSourceMessageId(messages, commitment, message),
+          resolveStoreQualifiedSourceMessageId(messages, commitment, message, sourceMessageIndex),
           commitment,
           sourceOrdinalByMessageId
         );
@@ -270,8 +274,13 @@ export const actionBrainOperations: Operation[] = [
       actor: { type: 'string', description: 'Actor writing created events' },
       model: { type: 'string', description: 'Anthropic model override' },
       timeout_ms: { type: 'number', description: 'Extractor timeout in milliseconds' },
-      owner_name: { type: 'string', description: 'Owner name used by extraction prompt grounding' },
-      owner_aliases: { type: 'array', items: { type: 'string' }, description: 'Optional owner alias list' },
+      owner_name: { type: 'string', description: 'Owner name used by extraction prompt grounding', maxLength: 100 },
+      owner_aliases: {
+        type: 'array',
+        items: { type: 'string', maxLength: 50 },
+        description: 'Optional owner alias list (max 10)',
+        maxItems: 10,
+      },
       owner_aliases_json: { type: 'string', description: 'JSON-encoded owner alias list (CLI-friendly)' },
       checkpoint_path: { type: 'string', description: 'Collector checkpoint path override' },
       wacli_limit: { type: 'number', description: 'Max messages per wacli list call (default: 200)' },

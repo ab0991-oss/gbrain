@@ -1,8 +1,10 @@
 import Anthropic from '@anthropic-ai/sdk';
 import {
+  buildSourceMessageIndex,
   buildSourceMessageRef,
   describeSourceMessageIdContract,
   resolveSourceMessage,
+  type SourceMessageIndex,
 } from './source-identity.ts';
 import type { ActionType } from './types.ts';
 
@@ -500,8 +502,9 @@ function stabilizeCommitments(
     return [];
   }
 
+  const sourceMessageIndex = buildSourceMessageIndex(messages);
   const withSource = commitments.map((commitment, index): CommitmentWithSource => {
-    const sourceMessage = resolveSourceMessageForCommitment(messages, commitment);
+    const sourceMessage = resolveSourceMessageForCommitment(messages, commitment, sourceMessageIndex);
     const sourceKey = sourceMessage ? buildSourceMessageRef(sourceMessage) : commitment.source_message_id ?? `__idx_${index}`;
 
     return {
@@ -697,9 +700,10 @@ function dedupeFallbackCommitments(commitments: StructuredCommitment[]): Structu
 
 function resolveSourceMessageForCommitment(
   messages: WhatsAppMessage[],
-  commitment: StructuredCommitment
+  commitment: StructuredCommitment,
+  sourceIndex: SourceMessageIndex
 ): WhatsAppMessage | null {
-  return resolveSourceMessage(messages, commitment);
+  return resolveSourceMessage(messages, commitment, sourceIndex);
 }
 
 function reconcileActor(
