@@ -235,17 +235,31 @@ function getClient(): AnthropicLike {
   return anthropicClient;
 }
 
+const MAX_OWNER_NAME_LEN = 100;
+const MAX_ALIAS_LEN = 50;
+const MAX_ALIAS_COUNT = 10;
+
+function sanitizeOwnerString(value: string): string {
+  return value.replace(/[\r\n\0<>]/g, ' ').trim().slice(0, MAX_OWNER_NAME_LEN);
+}
+
 function buildExtractionRequest(
   model: string,
   messages: WhatsAppMessage[],
   ownerName: string | null,
   ownerAliases: string[]
 ): AnthropicCreateParams {
-  const ownerContext = ownerName
+  const safeName = ownerName ? sanitizeOwnerString(ownerName) : null;
+  const safeAliases = ownerAliases
+    .slice(0, MAX_ALIAS_COUNT)
+    .map((a) => sanitizeOwnerString(a).slice(0, MAX_ALIAS_LEN))
+    .filter(Boolean);
+
+  const ownerContext = safeName
     ? [
-        `You are extracting commitments for the owner: ${ownerName}.`,
-        ownerAliases.length > 0
-          ? `The owner may also appear as: ${ownerAliases.join(', ')}.`
+        `You are extracting commitments for the owner: ${safeName}.`,
+        safeAliases.length > 0
+          ? `The owner may also appear as: ${safeAliases.join(', ')}.`
           : '',
         'When the owner sends a message (from_me), the "who" field should be their full name.',
         'When someone addresses the owner as "you" or "customer" or "tenant", resolve "who" to the owner\'s name.',
