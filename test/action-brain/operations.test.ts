@@ -308,4 +308,108 @@ describe('Action Brain operation integration', () => {
       expect(rows.rows[0].confidence).toBe(0.95);
     });
   });
+
+  test('action_ingest persists low-confidence commitments into action_drops and excludes them from action_items', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const actionIngest = getActionOperation('action_ingest');
+      const actionList = getActionOperation('action_list');
+      const messages = [
+        {
+          ChatName: 'Ops',
+          SenderName: 'Joe',
+          Timestamp: '2026-04-16T08:00:00.000Z',
+          Text: 'Low-confidence note. Reach me at joe@example.com or +1 415 555 0199',
+          MsgID: 'm1',
+        },
+      ];
+      const commitments = [
+        {
+          who: 'Joe',
+          owes_what: 'Share low confidence update',
+          to_whom: 'Abhi',
+          by_when: null,
+          confidence: 0.62,
+          type: 'commitment',
+          source_message_id: 'm1',
+        },
+        {
+          who: 'Joe',
+          owes_what: 'Share final docs',
+          to_whom: 'Abhi',
+          by_when: null,
+          confidence: 0.95,
+          type: 'commitment',
+          source_message_id: 'm1',
+        },
+      ];
+
+      const result = await actionIngest.handler(ctx, { messages, commitments });
+      expect(result.created_count).toBe(1);
+      expect(result.dropped_count).toBe(1);
+      expect(typeof result.run_id).toBe('string');
+
+      const db = (engine as unknown as EngineWithDb).db;
+      const items = await db.query(
+        `SELECT title
+         FROM action_items`
+      );
+      expect(items.rows.length).toBe(1);
+      expect(items.rows[0].title).toBe('Share final docs');
+
+      const drops = await db.query(
+        `SELECT run_id, source_id, source_excerpt, drop_reason, confidence, extractor_version, model
+         FROM action_drops`
+      );
+      expect(drops.rows.length).toBe(1);
+      expect(drops.rows[0].drop_reason).toBe('low_confidence');
+      expect(Number(drops.rows[0].confidence)).toBe(0.62);
+      expect(drops.rows[0].source_id).toMatch(/^m1:ab:/);
+      expect(drops.rows[0].source_excerpt).toContain('[redacted-email]');
+      expect(drops.rows[0].source_excerpt).toContain('[redacted-number]');
+      expect(drops.rows[0].model).toBe('direct_commitments');
+      expect(drops.rows[0].extractor_version).toBe('extractor.ts@v1');
+      expect(drops.rows[0].run_id).toBe(result.run_id);
+
+      const filtered = await actionList.handler(ctx, { filter: 'low_confidence_dropped' });
+      expect(Array.isArray(filtered)).toBe(true);
+      expect(filtered.length).toBe(1);
+      expect(filtered[0].drop_reason).toBe('low_confidence');
+      expect(filtered[0].source_id).toMatch(/^m1:ab:/);
+    });
+  });
+
+  test('low-confidence drop source excerpts are bounded to 500 chars', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const actionIngest = getActionOperation('action_ingest');
+      const oversizedText = `${'x'.repeat(900)} joe@example.com +14155550199`;
+      const messages = [
+        {
+          ChatName: 'Ops',
+          SenderName: 'Joe',
+          Timestamp: '2026-04-16T08:00:00.000Z',
+          Text: oversizedText,
+          MsgID: 'm1',
+        },
+      ];
+      const commitments = [
+        {
+          who: 'Joe',
+          owes_what: 'Send docs',
+          to_whom: 'Abhi',
+          by_when: null,
+          confidence: 0.4,
+          type: 'commitment',
+          source_message_id: 'm1',
+        },
+      ];
+
+      await actionIngest.handler(ctx, { messages, commitments });
+
+      const db = (engine as unknown as EngineWithDb).db;
+      const rows = await db.query(`SELECT source_excerpt FROM action_drops`);
+      expect(rows.rows.length).toBe(1);
+      const excerpt = String(rows.rows[0].source_excerpt);
+      expect(excerpt.length).toBeLessThanOrEqual(500);
+    });
+  });
 });
