@@ -61,6 +61,7 @@ docs/                     Architecture docs
 ```bash
 bun test                          # all tests (unit + E2E skipped without DB)
 bun test test/markdown.test.ts    # specific unit test
+bun test test/action-brain/gold-set.test.ts  # Action Brain recall gate (GIT-175)
 
 # E2E tests (requires Postgres with pgvector)
 docker compose -f docker-compose.test.yml up -d
@@ -69,6 +70,21 @@ DATABASE_URL=postgresql://postgres:postgres@localhost:5434/gbrain_test bun run t
 # Or use your own Postgres / Supabase
 DATABASE_URL=postgresql://... bun run test:e2e
 ```
+
+### Action Brain private gold-set contract
+
+`test/action-brain/gold-set.test.ts` always runs a checked-in 13-message fixture and
+enforces recall `>= 0.90` for the extractor path. For local validation against the
+private 50+ message corpus, set:
+
+```bash
+ACTION_BRAIN_PRIVATE_GOLD_SET_PATH=/absolute/path/to/private-gold-set.jsonl
+```
+
+Contract for that private file:
+- JSONL format with one object per line
+- each row includes `id`, `message`, `expectedCommitments`, `baselineCommitments`
+- at least 50 rows (kept outside this repository; never committed)
 
 ## Building
 
