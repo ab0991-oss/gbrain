@@ -53,6 +53,7 @@ export const ACTION_BRIEF_STALE_CONTEXT_SWEEP_CONCURRENCY = 4;
 export const ACTION_BRIEF_STALE_CONTEXT_SWEEP_CAP = 24;
 const ACTION_BRIEF_STALE_CONTEXT_THREAD_FETCH_TIMEOUT_MS = ACTION_DRAFT_CONTEXT_THREAD_FETCH_TIMEOUT_MS;
 const ACTION_BRIEF_STALE_CONTEXT_SWEEP_CURSOR_KEY = 'stale_context_sweep_cursor_draft_id';
+const ACTION_BRIEF_STALE_CONTEXT_SWEEP_REMAINING_KEY = 'stale_context_sweep_remaining';
 const execFileAsync = promisify(execFile);
 const initializedEngines = new WeakSet<object>();
 const postgresDbCache = new WeakMap<object, QueryableDb>();
@@ -154,7 +155,13 @@ interface PendingDraftContextCheckRow {
 }
 
 interface ActionRuntimeStateRow {
+  key: string;
   value_text: string;
+}
+
+interface StaleContextSweepState {
+  cursor: number;
+  remaining: number;
 }
 
 interface SendCommandResult {
@@ -1884,42 +1891,85 @@ async function supersedePendingDraftsWithStaleContext(
 
 async function leasePendingDraftsForStaleContextSweep(db: QueryableDb): Promise<PendingDraftContextCheckRow[]> {
   return withDbTransaction(db, async (txDb) => {
-    const cursor = await lockStaleContextSweepCursor(txDb);
-    const firstWindow = await selectPendingDraftsForStaleSweep(txDb, cursor);
-    const selected = firstWindow.length > 0 ? firstWindow : cursor > 0 ? await selectPendingDraftsForStaleSweep(txDb, 0) : [];
-    const nextCursor = selected.length > 0 ? selected[selected.length - 1].draft_id : 0;
-    await updateStaleContextSweepCursor(txDb, nextCursor);
+    const state = await lockStaleContextSweepState(txDb);
+    const hasRemainingLease = state.remaining > 0;
+    const cursor = hasRemainingLease ? state.cursor : 0;
+    const remainingToLease = hasRemainingLease ? state.remaining : await countPendingDraftsForStaleSweep(txDb);
+    const selected = remainingToLease > 0 ? await selectPendingDraftsForStaleSweep(txDb, cursor) : [];
+
+    let nextCursor = selected.length > 0 ? selected[selected.length - 1].draft_id : 0;
+    let nextRemaining = Math.max(0, remainingToLease - selected.length);
+
+    if (selected.length === 0 || nextRemaining === 0) {
+      // Force a wrap to keep fairness independent from continuous new inserts.
+      nextCursor = 0;
+      nextRemaining = 0;
+    }
+
+    await updateStaleContextSweepState(txDb, {
+      cursor: nextCursor,
+      remaining: nextRemaining,
+    });
     return selected;
   });
 }
 
-async function lockStaleContextSweepCursor(db: QueryableDb): Promise<number> {
+async function lockStaleContextSweepState(db: QueryableDb): Promise<StaleContextSweepState> {
   await db.query(
     `INSERT INTO action_runtime_state (key, value_text)
-     VALUES ($1, '0')
+     VALUES ($1, '0'), ($2, '0')
      ON CONFLICT (key) DO NOTHING`,
-    [ACTION_BRIEF_STALE_CONTEXT_SWEEP_CURSOR_KEY]
+    [ACTION_BRIEF_STALE_CONTEXT_SWEEP_CURSOR_KEY, ACTION_BRIEF_STALE_CONTEXT_SWEEP_REMAINING_KEY]
   );
   const result = await db.query<ActionRuntimeStateRow>(
-    `SELECT value_text
+    `SELECT key, value_text
      FROM action_runtime_state
-     WHERE key = $1
+     WHERE key = ANY($1::text[])
      FOR UPDATE`,
-    [ACTION_BRIEF_STALE_CONTEXT_SWEEP_CURSOR_KEY]
+    [[ACTION_BRIEF_STALE_CONTEXT_SWEEP_CURSOR_KEY, ACTION_BRIEF_STALE_CONTEXT_SWEEP_REMAINING_KEY]]
   );
-  const raw = result.rows[0]?.value_text ?? '0';
-  const parsed = Number(raw);
-  return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
+  const state = {
+    cursor: 0,
+    remaining: 0,
+  };
+  for (const row of result.rows) {
+    const parsed = Number(row.value_text);
+    const value = Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
+    if (row.key === ACTION_BRIEF_STALE_CONTEXT_SWEEP_CURSOR_KEY) {
+      state.cursor = value;
+    } else if (row.key === ACTION_BRIEF_STALE_CONTEXT_SWEEP_REMAINING_KEY) {
+      state.remaining = value;
+    }
+  }
+  return state;
 }
 
-async function updateStaleContextSweepCursor(db: QueryableDb, cursor: number): Promise<void> {
+async function updateStaleContextSweepState(db: QueryableDb, state: StaleContextSweepState): Promise<void> {
   await db.query(
     `UPDATE action_runtime_state
      SET value_text = $2,
          updated_at = now()
      WHERE key = $1`,
-    [ACTION_BRIEF_STALE_CONTEXT_SWEEP_CURSOR_KEY, String(Math.max(0, cursor))]
+    [ACTION_BRIEF_STALE_CONTEXT_SWEEP_CURSOR_KEY, String(Math.max(0, state.cursor))]
   );
+  await db.query(
+    `UPDATE action_runtime_state
+     SET value_text = $2,
+         updated_at = now()
+     WHERE key = $1`,
+    [ACTION_BRIEF_STALE_CONTEXT_SWEEP_REMAINING_KEY, String(Math.max(0, state.remaining))]
+  );
+}
+
+async function countPendingDraftsForStaleSweep(db: QueryableDb): Promise<number> {
+  const result = await db.query<{ count: number | string }>(
+    `SELECT count(*)::int AS count
+     FROM action_drafts d
+     INNER JOIN action_items ai ON ai.id = d.action_item_id
+     WHERE d.status = 'pending'
+       AND ai.status NOT IN ('resolved', 'dropped')`
+  );
+  return Number(result.rows[0]?.count ?? 0);
 }
 
 async function selectPendingDraftsForStaleSweep(

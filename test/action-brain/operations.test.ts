@@ -1152,7 +1152,7 @@ describe('Action Brain operation integration', () => {
     });
   });
 
-  test('action_brief stale-context sweep progresses past unchanged head window across bounded runs', async () => {
+  test('action_brief stale-context sweep revisits previously checked low-id drafts under sustained ingest', async () => {
     await withActionContext(async (ctx, engine) => {
       const db = (engine as unknown as EngineWithDb).db;
       const actionBrief = getActionOperation('action_brief');
@@ -1160,42 +1160,79 @@ describe('Action Brain operation integration', () => {
         source_contact: '',
         source_thread: '',
       });
+      const staleThread = 'stale-thread-id';
+      const initialThreadPayload = {
+        success: true,
+        data: {
+          messages: [{ SenderName: 'Ops', Timestamp: '2026-04-20T08:00:00Z', Text: 'initial context message' }],
+        },
+      };
+      const changedThreadPayload = {
+        success: true,
+        data: {
+          messages: [{ SenderName: 'Ops', Timestamp: '2026-04-20T08:05:00Z', Text: 'changed context message' }],
+        },
+      };
+      let initialThreadContextHash = '';
 
-      for (let idx = 0; idx < ACTION_BRIEF_STALE_CONTEXT_SWEEP_CAP; idx += 1) {
+      await withMockWacliPayload(initialThreadPayload, async () => {
+        const initialThreadContext = await buildActionDraftContextSource(engine, {
+          source_contact: '',
+          source_thread: staleThread,
+        });
+        initialThreadContextHash = initialThreadContext.context_hash;
+      });
+
+      const staleSeed = await seedActionItemAndDraft(engine, {
+        title: 'Checked-then-stale low id draft',
+        sourceContact: '',
+        sourceThread: staleThread,
+        contextHash: initialThreadContextHash,
+      });
+
+      for (let idx = 0; idx < ACTION_BRIEF_STALE_CONTEXT_SWEEP_CAP - 1; idx += 1) {
         await seedActionItemAndDraft(engine, {
-          title: `Unchanged window ${idx}`,
+          title: `Head window unchanged ${idx}`,
           sourceContact: '',
           sourceThread: '',
           contextHash: unchangedContext.context_hash,
         });
       }
 
-      const staleSeed = await seedActionItemAndDraft(engine, {
-        title: 'Late stale draft',
-        sourceContact: '',
-        sourceThread: '',
-        contextHash: 'stale-window-tail-hash',
+      await withMockWacliPayload(initialThreadPayload, async () => {
+        await actionBrief.handler(ctx, {});
       });
 
-      await actionBrief.handler(ctx, {});
-
-      const firstPassStatus = await db.query<{ status: string }>(
+      const checkedStatus = await db.query<{ status: string }>(
         `SELECT status
          FROM action_drafts
          WHERE id = $1`,
         [staleSeed.draftId]
       );
-      expect(firstPassStatus.rows[0]?.status).toBe('pending');
+      expect(checkedStatus.rows[0]?.status).toBe('pending');
 
-      await actionBrief.handler(ctx, {});
+      for (let run = 0; run < 3; run += 1) {
+        for (let idx = 0; idx < ACTION_BRIEF_STALE_CONTEXT_SWEEP_CAP; idx += 1) {
+          await seedActionItemAndDraft(engine, {
+            title: `Continuous ingest ${run}-${idx}`,
+            sourceContact: '',
+            sourceThread: '',
+            contextHash: unchangedContext.context_hash,
+          });
+        }
 
-      const secondPassStatus = await db.query<{ status: string }>(
+        await withMockWacliPayload(changedThreadPayload, async () => {
+          await actionBrief.handler(ctx, {});
+        });
+      }
+
+      const finalStatus = await db.query<{ status: string }>(
         `SELECT status
          FROM action_drafts
          WHERE id = $1`,
         [staleSeed.draftId]
       );
-      expect(secondPassStatus.rows[0]?.status).toBe('superseded');
+      expect(finalStatus.rows[0]?.status).toBe('superseded');
 
       const supersededHistory = await db.query(
         `SELECT count(*)::int AS n
