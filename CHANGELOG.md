@@ -2,6 +2,40 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.14.1] - 2026-04-20
+
+**Action Brain 0.3 plan locked. Seven children, one direction, no ambiguity.**
+**Upstream catchup scope is defined. The wave starts when the plan lands.**
+
+Action Brain 0.3 has a locked execution plan. The scope covers absorbing three upstream PRs (#231, #210, #217) and wiring four integration steps into the fork: Resolver SDK in `action_brief`, typed-edge linking in `action_drafts`, Budget-layer adoption in draft generation, and a security-invariant audit. Seven sequential child issues, no parallelization, each gated on the previous child landing on `master`.
+
+The plan resolves a key open question from the 0.2 wave: upstream Knowledge Runtime, shell jobs, and typed graph edges were not yet absorbed. This plan makes that work explicit, ordered, and executable. CTO and Staff signed off on the corrected upstream ancestry order (`c22ca84` -> `c89aa90` -> `5fd9cd2`) before this landed.
+
+No code ships in this release. The deliverable is the plan.
+
+### The numbers that matter
+
+Source: `git log master..HEAD --oneline` on `impl/git-1066-0.3-upstream-catchup-plan`. No benchmark data applies to a docs-only release.
+
+| Metric | Value |
+|--------|-------|
+| Plan children | 7 (sequential) |
+| Upstream PRs absorbed | 3 (#231, #210, #217) |
+| Integration steps | 4 (Resolver SDK, typed edges, Budget layer, security audit) |
+| Files changed | 1 |
+| Lines added | 204 |
+
+Three commits refined the plan from draft to locked: initial locked plan, parent contract alignment, and upstream ancestry reorder (confirmed via `git merge-base --is-ancestor` by Staff). The final locked plan is in `docs/designs/action-brain/0.3-upstream-catchup.md`.
+
+What this means for implementors: Child 1 (`GIT-1070`) can start. Every child has a concrete implementation contract, validation gates, and issue hygiene rules. The plan is executable.
+
+### Itemized changes
+
+#### Documentation
+- Add `docs/designs/action-brain/0.3-upstream-catchup.md` — locked 0.3 plan with seven sequential children, upstream absorption contracts, integration requirements, and rollout sequence.
+- Align plan with parent integration contract (`GIT-1066` one-line contract and explicit integration scope).
+- Correct upstream absorption order to match ancestry: `c22ca84` (#231) -> `c89aa90` (#210) -> `5fd9cd2` (#217), verified by Staff via `git merge-base --is-ancestor` checks.
+
 ## [0.14.0] - 2026-04-20
 
 ## **Action Brain 0.2 is live: draft approvals, wacli send, and concurrent retry correctness.**
