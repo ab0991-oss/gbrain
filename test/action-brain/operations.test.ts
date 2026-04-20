@@ -562,6 +562,70 @@ describe('Action Brain operation integration', () => {
     });
   });
 
+  test('action_draft_approve recovers stale sending drafts without delivery confirmation into send_failed without re-sending', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const { draftId, itemId } = await seedActionItemAndDraft(engine);
+      const db = (engine as unknown as EngineWithDb).db;
+      const actionDraftApprove = getActionOperation('action_draft_approve');
+
+      await db.query(
+        `UPDATE action_drafts
+         SET status = 'sending',
+             approved_at = now() - interval '5 minutes',
+             sent_at = NULL
+         WHERE id = $1`,
+        [draftId]
+      );
+
+      const calls: Array<{ command: string; args: string[] }> = [];
+      setActionDraftSendExecutorForTests(async (command, args) => {
+        calls.push({ command, args: [...args] });
+        return { stdout: 'ok', stderr: '' };
+      });
+
+      try {
+        const noRetry = await actionDraftApprove.handler(ctx, { id: draftId });
+        expect(noRetry.status).toBe('already_processed');
+        expect(noRetry.draft_status).toBe('sending');
+        expect(noRetry.retry_required).toBe(true);
+
+        const recovered = await actionDraftApprove.handler(ctx, { id: draftId, retry: true });
+        expect(recovered.status).toBe('send_failed');
+        expect(recovered.resumed_from_status).toBe('sending');
+        expect(recovered.recovered_without_resend).toBe(true);
+        expect(calls.length).toBe(0);
+
+        const finalDraft = await db.query(
+          `SELECT status, sent_at, send_error
+           FROM action_drafts
+           WHERE id = $1`,
+          [draftId]
+        );
+        expect(finalDraft.rows[0]?.status).toBe('send_failed');
+        expect(finalDraft.rows[0]?.sent_at).toBeNull();
+        expect(String(finalDraft.rows[0]?.send_error)).toContain('delivery confirmation missing');
+
+        const recoveredHistory = await db.query(
+          `SELECT metadata
+           FROM action_history
+           WHERE item_id = $1
+             AND event_type = 'draft_send_failed'
+           ORDER BY id DESC
+           LIMIT 1`,
+          [itemId]
+        );
+        const metadataValue = recoveredHistory.rows[0]?.metadata;
+        const metadataRecord =
+          metadataValue && typeof metadataValue === 'string' ? JSON.parse(metadataValue) : metadataValue;
+        expect(metadataRecord?.draft_id).toBe(draftId);
+        expect(metadataRecord?.resumed_from_status).toBe('sending');
+        expect(metadataRecord?.recovery_mode).toBe('missing_delivery_confirmation');
+      } finally {
+        setActionDraftSendExecutorForTests(null);
+      }
+    });
+  });
+
   test('action_draft_reject, action_draft_edit, and action_draft_regenerate emit expected history events', async () => {
     await withActionContext(async (ctx, engine) => {
       const db = (engine as unknown as EngineWithDb).db;
