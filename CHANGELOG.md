@@ -11,7 +11,7 @@ Action Brain 0.2 ships the full draft approval pipeline. You generate a draft, r
 `gbrain action draft list`, approve it with `gbrain action draft approve <id>`, and the message
 goes out over wacli. The morning brief now renders pending drafts and send failures inline so
 you never lose track of what's waiting on you. The `action_drafts` table tracks every version,
-status, and context snapshot — full audit trail.
+status, and context snapshot. Full audit trail.
 
 The hardest part was the concurrent retry path. Drafts in `sending` status required careful
 state anchoring so a retry doesn't resend a draft that already went out. Five commits address
@@ -40,7 +40,7 @@ Gold-set gate: `test/action-brain/draft-gold-set.test.ts` + `test/action-brain/g
 
 A draft that would have silently double-sent on a network retry now hits the version
 check on the `sending` claim and skips. The `sent_without_approval` QA query now does
-`(item_id, draft_id)` linkage with a 30s proximity guard — the only way it passes
+`(item_id, draft_id)` linkage with a 30s proximity guard. The only way it passes
 is if the specific draft was actually approved.
 
 What this means: you can approve and send drafts with confidence. The audit trail in
