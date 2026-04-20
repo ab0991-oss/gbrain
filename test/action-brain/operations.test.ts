@@ -262,6 +262,136 @@ describe('Action Brain operation integration', () => {
     });
   });
 
+  test('action_draft_approve requires explicit retry to recover send_failed drafts', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const { draftId, itemId } = await seedActionItemAndDraft(engine);
+      const db = (engine as unknown as EngineWithDb).db;
+      const actionDraftApprove = getActionOperation('action_draft_approve');
+
+      const calls: Array<{ command: string; args: string[] }> = [];
+      setActionDraftSendExecutorForTests(async (command, args) => {
+        calls.push({ command, args: [...args] });
+        if (calls.length === 1) {
+          throw new Error('simulated transport error');
+        }
+        return { stdout: 'ok', stderr: '' };
+      });
+
+      try {
+        const first = await actionDraftApprove.handler(ctx, { id: draftId });
+        expect(first.status).toBe('send_failed');
+
+        const noRetry = await actionDraftApprove.handler(ctx, { id: draftId });
+        expect(noRetry.status).toBe('already_processed');
+        expect(noRetry.draft_status).toBe('send_failed');
+        expect(noRetry.retry_required).toBe(true);
+
+        const withRetry = await actionDraftApprove.handler(ctx, { id: draftId, retry: true });
+        expect(withRetry.status).toBe('sent');
+        expect(withRetry.resumed_from_status).toBe('send_failed');
+
+        expect(calls.length).toBe(2);
+        expect(calls[0]?.command).toBe('wacli');
+        expect(calls[1]?.command).toBe('wacli');
+
+        const draftRow = await db.query(
+          `SELECT status, send_error
+           FROM action_drafts
+           WHERE id = $1`,
+          [draftId]
+        );
+        expect(draftRow.rows[0]?.status).toBe('sent');
+        expect(draftRow.rows[0]?.send_error).toBeNull();
+
+        const actionRow = await db.query(
+          `SELECT status
+           FROM action_items
+           WHERE id = $1`,
+          [itemId]
+        );
+        expect(actionRow.rows[0]?.status).toBe('in_progress');
+
+        const history = await db.query(
+          `SELECT event_type
+           FROM action_history
+           WHERE item_id = $1
+           ORDER BY id`,
+          [itemId]
+        );
+        const eventTypes = history.rows.map((row) => row.event_type);
+        expect(eventTypes.filter((eventType) => eventType === 'draft_approved')).toHaveLength(1);
+        expect(eventTypes.filter((eventType) => eventType === 'draft_send_failed')).toHaveLength(1);
+        expect(eventTypes.filter((eventType) => eventType === 'draft_sent')).toHaveLength(1);
+      } finally {
+        setActionDraftSendExecutorForTests(null);
+      }
+    });
+  });
+
+  test('action_draft_approve resumes interrupted approved drafts when retry=true', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const { draftId, itemId } = await seedActionItemAndDraft(engine);
+      const db = (engine as unknown as EngineWithDb).db;
+      const actionDraftApprove = getActionOperation('action_draft_approve');
+
+      await db.query(
+        `UPDATE action_drafts
+         SET status = 'approved',
+             approved_at = now()
+         WHERE id = $1`,
+        [draftId]
+      );
+      await db.query(
+        `INSERT INTO action_history (item_id, event_type, actor, metadata)
+         VALUES ($1, 'draft_approved', 'human_feedback', $2::jsonb)`,
+        [itemId, JSON.stringify({ draft_id: draftId, simulated_interruption: true })]
+      );
+
+      const calls: Array<{ command: string; args: string[] }> = [];
+      setActionDraftSendExecutorForTests(async (command, args) => {
+        calls.push({ command, args: [...args] });
+        return { stdout: 'ok', stderr: '' };
+      });
+
+      try {
+        const noRetry = await actionDraftApprove.handler(ctx, { id: draftId });
+        expect(noRetry.status).toBe('already_processed');
+        expect(noRetry.draft_status).toBe('approved');
+        expect(noRetry.retry_required).toBe(true);
+
+        const resumed = await actionDraftApprove.handler(ctx, { id: draftId, retry: true });
+        expect(resumed.status).toBe('sent');
+        expect(resumed.resumed_from_status).toBe('approved');
+        expect(calls.length).toBe(1);
+
+        const draftRow = await db.query(
+          `SELECT status, send_error
+           FROM action_drafts
+           WHERE id = $1`,
+          [draftId]
+        );
+        expect(draftRow.rows[0]?.status).toBe('sent');
+        expect(draftRow.rows[0]?.send_error).toBeNull();
+
+        const sentEventRow = await db.query(
+          `SELECT metadata
+           FROM action_history
+           WHERE item_id = $1
+             AND event_type = 'draft_sent'
+           ORDER BY id DESC
+           LIMIT 1`,
+          [itemId]
+        );
+        const metadataValue = sentEventRow.rows[0]?.metadata;
+        const metadataRecord =
+          metadataValue && typeof metadataValue === 'string' ? JSON.parse(metadataValue) : metadataValue;
+        expect(metadataRecord?.resumed_from_status).toBe('approved');
+      } finally {
+        setActionDraftSendExecutorForTests(null);
+      }
+    });
+  });
+
   test('action_draft_reject, action_draft_edit, and action_draft_regenerate emit expected history events', async () => {
     await withActionContext(async (ctx, engine) => {
       const db = (engine as unknown as EngineWithDb).db;
