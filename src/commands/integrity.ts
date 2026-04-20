@@ -20,8 +20,8 @@
  *   < 0.5 → skip, log to ~/.gbrain/integrity.log.jsonl
  *
  * Progress is durable at ~/.gbrain/integrity-progress.jsonl. Re-running
- * after a kill resumes from the last processed slug; already-repaired pages
- * are not revisited.
+ * after a kill resumes from the last checkpoint within each slug; completed
+ * pages are not revisited.
  */
 
 import { appendFileSync, existsSync, readFileSync, mkdirSync, writeFileSync } from 'fs';
@@ -44,10 +44,24 @@ import { tweetCitation } from '../core/output/scaffold.ts';
 // Paths
 // ---------------------------------------------------------------------------
 
-const GBRAIN_DIR = join(homedir(), '.gbrain');
-const REVIEW_FILE = join(GBRAIN_DIR, 'integrity-review.md');
-const LOG_FILE = join(GBRAIN_DIR, 'integrity.log.jsonl');
-const PROGRESS_FILE = join(GBRAIN_DIR, 'integrity-progress.jsonl');
+const DEFAULT_GBRAIN_DIR = join(homedir(), '.gbrain');
+
+function getGbrainDir(): string {
+  const override = process.env.GBRAIN_INTEGRITY_DIR?.trim();
+  return override && override.length > 0 ? override : DEFAULT_GBRAIN_DIR;
+}
+
+function getReviewFile(): string {
+  return join(getGbrainDir(), 'integrity-review.md');
+}
+
+function getLogFile(): string {
+  return join(getGbrainDir(), 'integrity.log.jsonl');
+}
+
+function getProgressFile(): string {
+  return join(getGbrainDir(), 'integrity-progress.jsonl');
+}
 
 // ---------------------------------------------------------------------------
 // Bare-tweet detection
@@ -152,33 +166,60 @@ export function findExternalLinks(compiledTruth: string, slug: string): External
 
 interface ProgressEntry {
   slug: string;
-  status: 'repaired' | 'reviewed' | 'skipped' | 'error';
+  status: 'repaired' | 'reviewed' | 'skipped' | 'error' | 'done';
   timestamp: string;
+  kind?: 'bare_tweet_hit' | 'dead_link_scan' | 'complete';
+  hitIndex?: number;
 }
 
-function loadProgress(): Set<string> {
-  if (!existsSync(PROGRESS_FILE)) return new Set();
-  const seen = new Set<string>();
-  const content = readFileSync(PROGRESS_FILE, 'utf-8');
+interface SlugProgressState {
+  complete: boolean;
+  bareTweetHitIndex: number;
+  deadLinksScanned: boolean;
+}
+
+function loadProgressState(): Map<string, SlugProgressState> {
+  const progressFile = getProgressFile();
+  if (!existsSync(progressFile)) return new Map<string, SlugProgressState>();
+  const progress = new Map<string, SlugProgressState>();
+  const content = readFileSync(progressFile, 'utf-8');
   for (const line of content.split('\n')) {
     if (!line.trim()) continue;
     try {
       const entry = JSON.parse(line) as ProgressEntry;
-      seen.add(entry.slug);
+      if (typeof entry.slug !== 'string' || entry.slug.length === 0) continue;
+      const state = progress.get(entry.slug) ?? {
+        complete: false,
+        bareTweetHitIndex: -1,
+        deadLinksScanned: false,
+      };
+      if (entry.kind === 'bare_tweet_hit' && Number.isInteger(entry.hitIndex)) {
+        state.bareTweetHitIndex = Math.max(state.bareTweetHitIndex, entry.hitIndex!);
+      } else if (entry.kind === 'dead_link_scan') {
+        state.deadLinksScanned = true;
+      } else if (entry.kind === 'complete') {
+        state.complete = true;
+      } else {
+        // Legacy format (pre-checkpoint kinds): any status entry means slug was complete.
+        state.complete = true;
+      }
+      progress.set(entry.slug, state);
     } catch {
       /* skip malformed lines */
     }
   }
-  return seen;
+  return progress;
 }
 
 function appendProgress(entry: ProgressEntry): void {
-  ensureDir(PROGRESS_FILE);
-  appendFileSync(PROGRESS_FILE, JSON.stringify(entry) + '\n', 'utf-8');
+  const progressFile = getProgressFile();
+  ensureDir(progressFile);
+  appendFileSync(progressFile, JSON.stringify(entry) + '\n', 'utf-8');
 }
 
 function clearProgress(): void {
-  if (existsSync(PROGRESS_FILE)) writeFileSync(PROGRESS_FILE, '', 'utf-8');
+  const progressFile = getProgressFile();
+  if (existsSync(progressFile)) writeFileSync(progressFile, '', 'utf-8');
 }
 
 function ensureDir(path: string): void {
@@ -212,7 +253,7 @@ export async function runIntegrity(args: string[]): Promise<void> {
   }
   if (sub === 'reset-progress') {
     clearProgress();
-    console.log('Cleared progress log:', PROGRESS_FILE);
+    console.log('Cleared progress log:', getProgressFile());
     return;
   }
 
@@ -334,7 +375,7 @@ async function cmdAuto(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  ensureDir(GBRAIN_DIR);
+  mkdirSync(getGbrainDir(), { recursive: true });
 
   const engine = await connect();
   const registry = getDefaultRegistry();
@@ -353,7 +394,7 @@ async function cmdAuto(args: string[]): Promise<void> {
     remote: false,
   };
 
-  const seen = resume ? loadProgress() : (clearProgress(), new Set<string>());
+  const progress = resume ? loadProgressState() : (clearProgress(), new Map<string, SlugProgressState>());
 
   let bucketAuto = 0;
   let bucketReview = 0;
@@ -365,19 +406,33 @@ async function cmdAuto(args: string[]): Promise<void> {
     const allSlugs = [...(await engine.getAllSlugs())].sort();
     for (const slug of allSlugs) {
       if (pagesProcessed >= limit) break;
-      if (seen.has(slug)) continue;
+      const state = progress.get(slug) ?? {
+        complete: false,
+        bareTweetHitIndex: -1,
+        deadLinksScanned: false,
+      };
+      if (state.complete) continue;
 
       const page = await engine.getPage(slug);
       if (!page) continue;
 
       pagesProcessed++;
+      let slugHasRepair = false;
+      let slugHasReview = false;
+      let slugHasSkip = false;
+      let slugHasError = false;
+      let bareTweetDone = skipTweet;
+      let deadLinksDone = skipUrls || state.deadLinksScanned;
 
       // Bare-tweet handling
       if (!skipTweet) {
         const hits = findBareTweetHits(page.compiled_truth, slug);
         const handle = extractXHandleFromFrontmatter(page.frontmatter);
+        const startHitIndex = Math.max(0, state.bareTweetHitIndex + 1);
         if (hits.length > 0 && handle) {
-          for (const hit of hits) {
+          for (let i = startHitIndex; i < hits.length; i++) {
+            const hit = hits[i]!;
+            let checkpointStatus: ProgressEntry['status'];
             try {
               const result = await registry.resolve<{ handle: string; keywords: string }, {
                 url?: string; tweet_id?: string; text?: string; created_at?: string;
@@ -392,46 +447,60 @@ async function cmdAuto(args: string[]): Promise<void> {
                   writer, slug, hit, result, handle, dryRun,
                 });
                 bucketAuto++;
-                // Dry-run must NOT persist 'repaired' — the follow-on real
-                // run needs to revisit these slugs and actually write.
-                if (!dryRun) {
-                  appendProgress({ slug, status: 'repaired', timestamp: new Date().toISOString() });
-                }
+                slugHasRepair = true;
+                checkpointStatus = 'repaired';
               } else if (result.confidence >= reviewLower) {
                 appendReview({ slug, hit, result, handle });
                 bucketReview++;
-                if (!dryRun) {
-                  appendProgress({ slug, status: 'reviewed', timestamp: new Date().toISOString() });
-                }
+                slugHasReview = true;
+                checkpointStatus = 'reviewed';
               } else {
                 logSkip({ slug, hit, reason: `confidence ${result.confidence.toFixed(2)} below threshold ${reviewLower}` });
                 bucketSkip++;
-                if (!dryRun) {
-                  appendProgress({ slug, status: 'skipped', timestamp: new Date().toISOString() });
-                }
+                slugHasSkip = true;
+                checkpointStatus = 'skipped';
               }
             } catch (e) {
               bucketErr++;
               logSkip({ slug, hit, reason: `resolver error: ${e instanceof Error ? e.message : String(e)}` });
-              if (!dryRun) {
-                appendProgress({ slug, status: 'error', timestamp: new Date().toISOString() });
-              }
+              slugHasError = true;
+              checkpointStatus = 'error';
+            }
+            if (!dryRun) {
+              appendProgress({
+                slug,
+                status: checkpointStatus,
+                timestamp: new Date().toISOString(),
+                kind: 'bare_tweet_hit',
+                hitIndex: i,
+              });
+              state.bareTweetHitIndex = i;
             }
           }
         } else if (hits.length > 0 && !handle) {
           // Can't repair without a handle; log once per page
-          for (const hit of hits) {
+          for (let i = startHitIndex; i < hits.length; i++) {
+            const hit = hits[i]!;
             logSkip({ slug, hit, reason: 'no x_handle in frontmatter to search from' });
+            if (!dryRun) {
+              appendProgress({
+                slug,
+                status: 'skipped',
+                timestamp: new Date().toISOString(),
+                kind: 'bare_tweet_hit',
+                hitIndex: i,
+              });
+              state.bareTweetHitIndex = i;
+            }
           }
-          bucketSkip += hits.length;
-          if (!dryRun) {
-            appendProgress({ slug, status: 'skipped', timestamp: new Date().toISOString() });
-          }
+          bucketSkip += Math.max(0, hits.length - startHitIndex);
+          if (hits.length > startHitIndex) slugHasSkip = true;
         }
+        bareTweetDone = hits.length === 0 || state.bareTweetHitIndex >= hits.length - 1;
       }
 
       // Dead-link handling (no auto-repair; just surface)
-      if (!skipUrls) {
+      if (!skipUrls && !state.deadLinksScanned) {
         const externalHits = findExternalLinks(page.compiled_truth, slug);
         // Limit to first few per page to keep the default run fast; --check
         // gives the full picture.
@@ -448,12 +517,43 @@ async function cmdAuto(args: string[]): Promise<void> {
                 reason: `dead link: ${result.value.reason ?? 'unknown'}`,
               });
               bucketReview++;
+              slugHasReview = true;
             }
           } catch {
             /* transient; don't fail the run */
           }
         }
+        if (!dryRun) {
+          appendProgress({
+            slug,
+            status: 'reviewed',
+            timestamp: new Date().toISOString(),
+            kind: 'dead_link_scan',
+          });
+          state.deadLinksScanned = true;
+        }
+        deadLinksDone = true;
       }
+
+      if (!dryRun && bareTweetDone && deadLinksDone) {
+        const finalStatus: ProgressEntry['status'] = slugHasError
+          ? 'error'
+          : slugHasRepair
+            ? 'repaired'
+            : slugHasReview
+              ? 'reviewed'
+              : slugHasSkip
+                ? 'skipped'
+                : 'done';
+        appendProgress({
+          slug,
+          status: finalStatus,
+          timestamp: new Date().toISOString(),
+          kind: 'complete',
+        });
+        state.complete = true;
+      }
+      progress.set(slug, state);
     }
 
     // Summary
@@ -464,9 +564,9 @@ async function cmdAuto(args: string[]): Promise<void> {
     console.log(`Review queue (≥${reviewLower} <${confidenceThreshold}): ${bucketReview}`);
     console.log(`Skipped (<${reviewLower}): ${bucketSkip}`);
     if (bucketErr > 0) console.log(`Resolver errors: ${bucketErr}`);
-    console.log(`\nReview queue: ${REVIEW_FILE}`);
-    console.log(`Skipped log:  ${LOG_FILE}`);
-    console.log(`Progress:     ${PROGRESS_FILE}`);
+    console.log(`\nReview queue: ${getReviewFile()}`);
+    console.log(`Skipped log:  ${getLogFile()}`);
+    console.log(`Progress:     ${getProgressFile()}`);
   } finally {
     await engine.disconnect();
   }
@@ -477,15 +577,16 @@ async function cmdAuto(args: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function cmdReview(): void {
-  if (!existsSync(REVIEW_FILE)) {
+  const reviewFile = getReviewFile();
+  if (!existsSync(reviewFile)) {
     console.log(`No review queue yet. Run: gbrain integrity auto --confidence 0.8`);
     return;
   }
-  const content = readFileSync(REVIEW_FILE, 'utf-8');
+  const content = readFileSync(reviewFile, 'utf-8');
   const count = (content.match(/^## /gm) ?? []).length;
-  console.log(`Review queue: ${REVIEW_FILE}`);
+  console.log(`Review queue: ${reviewFile}`);
   console.log(`Entries: ${count}`);
-  console.log(`\nOpen with: $EDITOR ${REVIEW_FILE}`);
+  console.log(`\nOpen with: $EDITOR ${reviewFile}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -566,7 +667,8 @@ interface ReviewArgs {
 }
 
 function appendReview(args: ReviewArgs): void {
-  ensureDir(REVIEW_FILE);
+  const reviewFile = getReviewFile();
+  ensureDir(reviewFile);
   const { slug, hit, result, handle } = args;
   const block = [
     `## ${slug}:${hit.line}  (confidence ${result.confidence.toFixed(2)})`,
@@ -580,12 +682,13 @@ function appendReview(args: ReviewArgs): void {
     '---',
     '',
   ].join('\n');
-  appendFileSync(REVIEW_FILE, block, 'utf-8');
+  appendFileSync(reviewFile, block, 'utf-8');
 }
 
 interface SkipArgs { slug: string; hit: BareTweetHit; reason: string }
 function logSkip(args: SkipArgs): void {
-  ensureDir(LOG_FILE);
+  const logFile = getLogFile();
+  ensureDir(logFile);
   const entry = {
     timestamp: new Date().toISOString(),
     slug: args.slug,
@@ -594,7 +697,7 @@ function logSkip(args: SkipArgs): void {
     raw: args.hit.rawLine.slice(0, 200),
     reason: args.reason,
   };
-  appendFileSync(LOG_FILE, JSON.stringify(entry) + '\n', 'utf-8');
+  appendFileSync(logFile, JSON.stringify(entry) + '\n', 'utf-8');
 }
 
 // ---------------------------------------------------------------------------
