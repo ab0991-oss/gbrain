@@ -124,7 +124,8 @@ strict behavior when unset.
 - `src/action-brain/action-engine.ts` — Storage layer: CRUD, priority scoring (urgency × confidence × recency), PGLite lifecycle
 - `src/action-brain/extractor.ts` — LLM commitment extraction (two-tier Haiku→Sonnet), XML delimiter defense, stable source IDs
 - `src/action-brain/brief.ts` — Morning priority brief generator: ranked action items, overdue detection, deduplication
-- `src/action-brain/operations.ts` — 5 Action Brain operations (action_list, action_brief, action_resolve, action_mark_fp, action_ingest)
+- `src/action-brain/context-source.ts` — Draft context builder: gbrain page excerpts + wacli thread fetch. Propagates `context_fetch_degraded = true` when either source fails; wacli `success=false` now throws so degraded state is never silently swallowed. `ActionDraftContextSourceResult` carries the flag for callers to gate stale-supersede logic.
+- `src/action-brain/operations.ts` — 5 Action Brain operations (action_list, action_brief, action_resolve, action_mark_fp, action_ingest). `supersedePendingDraftsOnContextHashChange` runs as a non-fatal pre-brief sweep (errors caught, brief always completes). `action_brief` is guarded by `ctx.dryRun` so dry-run calls never mutate draft state. `generation_failed` and `no_recipient` paths in `action_draft_regenerate` now validate recipient + draft-text before calling `supersedePendingDrafts`, so no action item is left stranded with zero pending drafts. `PendingDraftContextRow.source_contact / source_thread` typed `string | null` to match DB reality.
 - `src/core/resolvers/index.ts` — Resolver SDK public surface; re-exports interface, registry, and builtin resolvers
 - `src/core/resolvers/interface.ts` — Typed Resolver interface: structured input → backend lookup → typed output
 - `src/core/resolvers/registry.ts` — ResolverRegistry: in-memory id→Resolver map, register/resolve helpers
@@ -207,7 +208,7 @@ parity), `test/cli.test.ts` (CLI structure), `test/config.test.ts` (config redac
 `test/action-brain/action-engine.test.ts` (CRUD, scoring, PGLite lifecycle),
 `test/action-brain/extractor.test.ts` (extraction, source ID stability, injection defense, timestamp bounds),
 `test/action-brain/brief.test.ts` (brief generation, scoring, dedup, overdue detection),
-`test/action-brain/operations.test.ts` (all 5 ops, ingest trust boundary, batch fallbacks, low-confidence drop audit trail).
+`test/action-brain/operations.test.ts` (all 5 ops, ingest trust boundary, batch fallbacks, low-confidence drop audit trail, 12 failure-mode cases: context-hash sweep non-fatal, dry-run no mutation, `no_recipient` stranding prevention, `generation_failed` stranding prevention, stale-supersede on degraded context-fetch skipped).
 `test/action-brain/gold-set.test.ts` (gold-set recall CI gate: `>= 90%` recall on 13-message synthetic fixture via `DeterministicGoldSetClient`, drop-one regression guard, private corpus contract via `ACTION_BRAIN_PRIVATE_GOLD_SET_PATH`).
 `test/action-brain/fixtures/gold-set.jsonl` — checked-in 13-row synthetic fixture for CI recall gate (no PII; private corpus stays out-of-repo via env var).
 `test/action-brain/collector.test.ts` (wacli collector: checkpoint store, stale lock reclaim, cross-process lock, overlap regression, stale orphan lock without owner metadata).
