@@ -2,6 +2,74 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.15.1] - 2026-04-21
+
+**Shell jobs ship: cron scripts move off the LLM gateway. Worker abort path is fixed.**
+
+This release absorbs upstream PR #217 into the fork. The headline is the `shell` job type for Minions: a way to run deterministic cron scripts (API fetches, token refreshes, file writes) as background jobs without consuming an Opus session each time. Two independent security gates guard execution: the CLI opt-in flag and a per-worker `GBRAIN_ALLOW_SHELL_JOBS=1` env requirement. A co-shipped fix corrects a long-standing abort-path bug where timed-out jobs were silently left stranded in `active` instead of being moved to `dead`.
+
+### The numbers that matter
+
+Source: `bun test test/minions-shell.test.ts` against PGLite in-process.
+
+| Metric | Before | After | Delta |
+|---|---|---|---|
+| Shell handler unit tests | 0 | 34 | +34 |
+| Abort scenarios covered | 0 | 4 | +4 (signal, shutdown, pre-abort, SIGKILL escalation) |
+| Timeout-abort routing | `delayed` (retry) | `dead` (terminal) | Correctness fix |
+| Protected-name bypass vectors | unknown | 3 (whitespace, case, spread) | All closed |
+
+Timeout-abort → `dead` matters in practice: a job that exceeded its wall-clock budget should not keep retrying. The prior `delayed` routing meant a badly-behaved script could loop until `max_attempts` ran out, burning worker time on each attempt.
+
+### What this means for operators
+
+Your Minions worker can now run shell cron scripts. Set `GBRAIN_ALLOW_SHELL_JOBS=1` on the worker process and submit with `gbrain jobs submit shell --params '{"cmd":"...","cwd":"/abs/path"}'`. Jobs submitted without the worker flag sit in `waiting` — the CLI prints a starvation warning. The audit log at `~/.gbrain/audit/shell-jobs-YYYY-Www.jsonl` tracks every submission for debugging without logging env values (which may carry secrets). Run `gbrain apply-migrations --yes` if upgrading from a prior v0.15.x.
+
+## To take advantage of v0.15.1
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Enable shell jobs on your worker (opt-in, default-off):**
+   ```bash
+   GBRAIN_ALLOW_SHELL_JOBS=1 gbrain jobs work
+   ```
+3. **Verify the outcome:**
+   ```bash
+   gbrain jobs submit shell --params '{"cmd":"echo ok","cwd":"/tmp"}' --follow
+   gbrain stats
+   ```
+4. **If any step fails,** file an issue with `gbrain doctor` output and `~/.gbrain/upgrade-errors.jsonl`.
+
+### Itemized changes
+
+#### Shell job handler (new)
+- `src/core/minions/handlers/shell.ts` — `shell` Minion handler. Runs `cmd` via `/bin/sh -c` (absolute path, PATH-poisoning-safe) or `argv` directly. Env allowlist (`PATH`, `HOME`, `USER`, `LANG`, `TZ`, `NODE_ENV`) prevents accidental secret leakage; callers add extra keys via `env:`. UTF-8-safe `TailBuffer` caps stdout at 64KB / stderr at 16KB with truncation markers.
+- `src/core/minions/handlers/shell-audit.ts` — JSONL submission audit log at `~/.gbrain/audit/shell-jobs-YYYY-Www.jsonl` (ISO week rotation, `GBRAIN_AUDIT_DIR` override). Best-effort: write failures go to stderr and never block submission. Never logs `env` values.
+- `src/core/minions/protected-names.ts` — side-effect-free constant module: `PROTECTED_JOB_NAMES = Set(['shell'])`. Imported by both queue and CLI path; must stay pure.
+
+#### Worker abort path fix
+- `src/core/minions/worker.ts` — `ctx.shutdownSignal` (fires only on SIGTERM/SIGINT, separate from per-job `signal`). Shell handler subscribes to both; non-shell handlers ignore `shutdownSignal` and run through the 30s cleanup race naturally. Abort reason is now an `Error` object (not a bare string), enabling structured reason extraction. Timed-out jobs now route to `dead` instead of `delayed` — timeout aborts are terminal.
+- `src/core/minions/types.ts` — `MinionJobContext.shutdownSignal` field added.
+
+#### Queue guard
+- `src/core/minions/queue.ts` — `MinionQueue.add()` gains a 4th `trusted` arg (`{allowProtectedSubmit: true}`). Protected names are rejected unless the flag is set explicitly. Whitespace bypass closed: name is trimmed before the guard check and before insert.
+- `src/core/operations.ts` — `submit_job` operation rejects protected names from MCP callers (`ctx.remote === true`) before touching the DB. `timeout_ms` field added.
+- `src/commands/jobs.ts` — `--timeout-ms` flag added to CLI submit. Shell submissions emit a starvation warning when `--follow` is not used and the worker env flag may not be set.
+
+#### Tests
+- `test/minions-shell.test.ts` — 355-line unit test file: protected-name guard, queue trusted-arg, handler validation, spawn + output, env allowlist, abort (signal + shutdown + pre-abort), SIGKILL escalation, ISO-week audit filename, audit write path, output truncation.
+- `test/e2e/minions-shell.test.ts` — E2E tests against real Postgres (skipped gracefully without `DATABASE_URL`).
+- `test/minions.test.ts` — regression guards updated for abort reason extraction.
+
+#### Docs
+- `docs/guides/minions-shell-jobs.md` — operator guide: security model, env allowlist, audit log, error reference, cron recipe.
+- `docs/UPGRADING_DOWNSTREAM_AGENTS.md` — v0.15.1 upgrade notes for agent forks.
+- `skills/migrations/v0.14.0.md` — migration orchestrator for downstream agents.
+
 ## [0.15.0] - 2026-04-21
 
 **Knowledge Runtime lands: Resolver SDK, BrainWriter, integrity repair, Budget ledger.**
