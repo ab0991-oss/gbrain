@@ -117,7 +117,7 @@ strict behavior when unset.
 - `src/commands/report.ts` — Structured report saver (audit trail for maintenance/enrichment)
 - `openclaw.plugin.json` — ClawHub bundle plugin manifest
 - `src/action-brain/types.ts` — Action Brain shared types (ActionItem, CommitmentBatch, ExtractionResult)
-- `src/action-brain/action-schema.ts` — PGLite DDL + idempotent schema init for action_items / action_history tables
+- `src/action-brain/action-schema.ts` — PGLite DDL + idempotent schema init for action_items / action_history / action_drops tables
 - `src/action-brain/action-engine.ts` — Storage layer: CRUD, priority scoring (urgency × confidence × recency), PGLite lifecycle
 - `src/action-brain/extractor.ts` — LLM commitment extraction (two-tier Haiku→Sonnet), XML delimiter defense, stable source IDs
 - `src/action-brain/brief.ts` — Morning priority brief generator: ranked action items, overdue detection, deduplication
@@ -146,6 +146,14 @@ Key commands added in v0.12.2:
 Key commands added in v0.12.3:
 - `gbrain orphans [--json] [--count] [--include-pseudo]` — surface pages with zero inbound wikilinks, grouped by domain. Auto-generated/raw/pseudo pages filtered by default. Also exposed as `find_orphans` MCP operation. The natural consumer of the v0.12.0 knowledge graph layer: once edges are captured, find the gaps.
 - `gbrain doctor` gains two new reliability detection checks: `jsonb_integrity` (v0.12.0 Postgres double-encode damage) and `markdown_body_completeness` (pages truncated by the old splitBody bug). Detection only; fix hints point at `gbrain repair-jsonb` and `gbrain sync --force`.
+
+Planned commands for Action Brain 0.2 draft approvals (not shipped on `master` until GIT-1062/GIT-1063 land):
+- `gbrain action draft list` — list pending/sent/failed drafts by priority.
+- `gbrain action draft show <draft_id>` — display full draft text plus context snapshot.
+- `gbrain action draft approve <draft_id>` — atomic approve + WhatsApp send path.
+- `gbrain action draft reject <draft_id> [--reason "..."]` — mark draft rejected with audit reason.
+- `gbrain action draft edit <draft_id> --text "..."` — update pending draft text before approval.
+- `gbrain action draft regenerate <item_id> [--hint "..."]` — create next-version draft for an action item.
 
 ## Testing
 
@@ -183,6 +191,7 @@ parity), `test/cli.test.ts` (CLI structure), `test/config.test.ts` (config redac
 `test/action-brain/gold-set.test.ts` (gold-set recall CI gate: `>= 90%` recall on 13-message synthetic fixture via `DeterministicGoldSetClient`, drop-one regression guard, private corpus contract via `ACTION_BRAIN_PRIVATE_GOLD_SET_PATH`).
 `test/action-brain/fixtures/gold-set.jsonl` — checked-in 13-row synthetic fixture for CI recall gate (no PII; private corpus stays out-of-repo via env var).
 `test/action-brain/collector.test.ts` (wacli collector: checkpoint store, stale lock reclaim, cross-process lock, overlap regression, stale orphan lock without owner metadata).
+`test/check-action-brain-no-autosend.test.ts` (CI guard for forbidden `auto.?send|autosend` wording: passes clean fixture, fails violation fixture, exits 2 on nonexistent directory).
 `test/check-resolvable.test.ts` (resolver reachability, MECE overlap, gap detection, DRY checks),
 `test/backoff.test.ts` (load-aware throttling, concurrency limits, active hours),
 `test/fail-improve.test.ts` (deterministic/LLM cascade, JSONL logging, test generation, rotation),
@@ -512,6 +521,16 @@ Key decisions:
 - Pipeline: WhatsApp ingest → LLM extraction → reconciliation → priority scoring → brief generation.
 - Stack: PGLite, Bun, TypeScript (same as GBrain core).
 - MVP 0.1: extraction + storage + morning brief. Prove accuracy before building infrastructure.
+
+Action Brain 0.2 (draft approvals) status:
+- Locked plan doc: `docs/designs/action-brain/0.2.md`.
+- Planned, not currently shipped on `master`. Treat as forward-looking until GIT-1061/GIT-1062/GIT-1063/GIT-1064 are all landed.
+- Auto-send remains forbidden by design.
+
+Planned 0.2 specifics (future state):
+- Drafts persist in `action_drafts` (versioned, one-to-many per action item).
+- Approval and send use one explicit CLI flow (`gbrain action draft approve <id>`).
+- The planned `action_drafts` schema lives in `docs/designs/action-brain/0.2.md` until code is merged.
 
 ## Skill routing
 
