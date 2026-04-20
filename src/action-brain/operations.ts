@@ -728,6 +728,20 @@ export const actionBrainOperations: Operation[] = [
           };
         }
 
+        if (stagedContextSource.context_fetch_degraded) {
+          await insertActionHistory(txDb, item.id, 'draft_skipped', actor, {
+            reason: 'context_fetch_degraded',
+            item_id: item.id,
+            source_contact: item.source_contact,
+            source_thread: item.source_thread,
+          });
+          return {
+            status: 'skipped' as const,
+            item_id: item.id,
+            reason: 'context_fetch_degraded' as const,
+          };
+        }
+
         let draftText: string;
         try {
           draftText = regeneratedDraftTextBuilder(item, latestDraft, hint);

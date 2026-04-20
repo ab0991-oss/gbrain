@@ -1050,7 +1050,7 @@ describe('Action Brain operation integration', () => {
       const actionDraftRegenerate = getActionOperation('action_draft_regenerate');
 
       const { itemId } = await seedActionItemAndDraft(engine, {
-        sourceContact: 'joe@c.us',
+        sourceContact: '',
       });
 
       setActionDraftRegenerateTextBuilderForTests(() => {
@@ -1089,6 +1089,66 @@ describe('Action Brain operation integration', () => {
       } finally {
         setActionDraftRegenerateTextBuilderForTests(null);
       }
+    });
+  });
+
+  test('action_draft_regenerate skips when context-source lookup is transiently degraded and preserves pending draft', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const db = (engine as unknown as EngineWithDb).db;
+      const actionDraftRegenerate = getActionOperation('action_draft_regenerate');
+      const { itemId, draftId } = await seedActionItemAndDraft(engine, {
+        sourceContact: 'joe@c.us',
+      });
+
+      const originalSearchKeyword = engine.searchKeyword.bind(engine);
+      (engine as any).searchKeyword = async () => {
+        throw new Error('transient gbrain lookup failure');
+      };
+
+      try {
+        const result = await actionDraftRegenerate.handler(ctx, {
+          item_id: itemId,
+        });
+        expect(result.status).toBe('skipped');
+        expect(result.reason).toBe('context_fetch_degraded');
+      } finally {
+        (engine as any).searchKeyword = originalSearchKeyword;
+      }
+
+      const draftRows = await db.query(
+        `SELECT id, status
+         FROM action_drafts
+         WHERE action_item_id = $1
+         ORDER BY id ASC`,
+        [itemId]
+      );
+      expect(draftRows.rows).toHaveLength(1);
+      expect(Number(draftRows.rows[0]?.id)).toBe(draftId);
+      expect(draftRows.rows[0]?.status).toBe('pending');
+
+      const supersededCount = await db.query(
+        `SELECT count(*)::int AS n
+         FROM action_history
+         WHERE item_id = $1
+           AND event_type = 'draft_superseded'`,
+        [itemId]
+      );
+      expect(Number((supersededCount.rows[0] as { n: number | string }).n)).toBe(0);
+
+      const skippedEvent = await db.query(
+        `SELECT metadata
+         FROM action_history
+         WHERE item_id = $1
+           AND event_type = 'draft_skipped'
+         ORDER BY id DESC
+         LIMIT 1`,
+        [itemId]
+      );
+      const metadataValue = skippedEvent.rows[0]?.metadata;
+      const metadataRecord =
+        metadataValue && typeof metadataValue === 'string' ? JSON.parse(metadataValue) : metadataValue;
+      expect(metadataRecord?.reason).toBe('context_fetch_degraded');
+      expect(metadataRecord?.item_id).toBe(itemId);
     });
   });
 
