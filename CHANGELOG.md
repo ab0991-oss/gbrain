@@ -2,28 +2,79 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.15.1] - 2026-04-21
+## [0.15.2] - 2026-04-21
 
-**Shell jobs ship: cron scripts move off the LLM gateway. Worker abort path is fixed.**
+**Action Brain sweep hardening: supersede-stranding eliminated, brief unblockable.**
 
-This release absorbs upstream PR #217 into the fork. The headline is the `shell` job type for Minions: a way to run deterministic cron scripts (API fetches, token refreshes, file writes) as background jobs without consuming an Opus session each time. Two independent security gates guard execution: the CLI opt-in flag and a per-worker `GBRAIN_ALLOW_SHELL_JOBS=1` env requirement. A co-shipped fix corrects a long-standing abort-path bug where timed-out jobs were silently left stranded in `active` instead of being moved to `dead`.
+Three correctness fixes found via adversarial review of the v0.15.1 failure-mode changes. The `generation_failed` and `no_recipient` paths in `action_draft_regenerate` previously committed a supersede of existing pending drafts before discovering that no new draft could be inserted — leaving the action item permanently stranded with zero pending drafts. Fixed by moving supersede to after pre-generation validation. The `supersedePendingDraftsOnContextHashChange` sweep in `action_brief` previously propagated any DB or subprocess error to the caller, which would prevent the morning brief from generating at all. Fixed with a non-fatal try/catch. Dry-run `action_brief` calls no longer mutate state.
 
 ### The numbers that matter
 
-Source: `bun test test/minions-shell.test.ts` against PGLite in-process.
+Source: `bun test test/action-brain/operations.test.ts` on the fixed branch.
+
+| Metric | Before | After | Δ |
+|--------|--------|-------|---|
+| action_brief resilience to sweep failures | fatal | non-fatal | correct |
+| generation_failed draft stranding | yes | no | fixed |
+| no_recipient draft stranding | yes | no | fixed |
+| dry-run action_brief mutates state | yes | no | fixed |
+| Tests | 1796 | 1796 | 0 regressions |
+
+### What this means for Action Brain users
+
+Your morning brief will generate even if the context-hash sweep hits a transient DB error or wacli subprocess failure. Draft regeneration failures no longer silently orphan action items with no pending drafts. Run `gbrain upgrade` to get the fix.
+
+## To take advantage of v0.15.2
+
+`gbrain upgrade` should do this automatically. If it didn't:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Verify:**
+   ```bash
+   gbrain action brief
+   gbrain stats
+   ```
+3. **If any step fails,** file an issue with `gbrain doctor` output.
+
+### Itemized changes
+
+#### Action Brain
+- `fix(action-brain)`: Move `supersedePendingDrafts` after recipient and draft-text validation in `action_draft_regenerate` — generation_failed and no_recipient paths no longer commit a supersede without inserting a replacement draft
+- `fix(action-brain)`: Wrap `supersedePendingDraftsOnContextHashChange` in try/catch in `action_brief` — sweep failures are non-fatal, brief generation always completes
+- `fix(action-brain)`: Guard context-hash sweep with `ctx.dryRun` check — dry-run briefs no longer mutate draft state
+- `fix(action-brain)`: Type `PendingDraftContextRow.source_contact/source_thread` as `string | null` to match DB reality
+
+## [0.15.1] - 2026-04-21
+
+**Shell jobs ship + Action Brain failure-mode hardening. Two correctness fixes in one patch.**
+
+This release absorbs upstream PR #217 into the fork and applies two targeted Action Brain fixes (GIT-1063). The Minions `shell` job type lets you run deterministic cron scripts as background jobs without consuming an Opus session. Two independent security gates guard shell execution: the CLI opt-in flag and a per-worker `GBRAIN_ALLOW_SHELL_JOBS=1` env requirement. A co-shipped worker fix corrects a long-standing abort-path bug where timed-out jobs were left in `active` instead of moved to `dead`.
+
+On the Action Brain side: when `wacli messages list` returns `success=false`, the system previously swallowed it silently and treated the empty result as fresh context. Now it throws, which propagates `context_fetch_degraded = true`. The stale context sweep correctly skips drafts instead of superseding them based on a broken diff. A legacy hash compatibility bridge handles drafts generated before `context_fetch_degraded` was added to the hash input, so existing brains upgrade without false supersedes.
+
+### The numbers that matter
+
+Source: `bun test` on merged branch against PGLite in-process.
 
 | Metric | Before | After | Delta |
-|---|---|---|---|
+|--------|--------|-------|-------|
 | Shell handler unit tests | 0 | 34 | +34 |
-| Abort scenarios covered | 0 | 4 | +4 (signal, shutdown, pre-abort, SIGKILL escalation) |
+| Abort scenarios covered | 0 | 4 | +4 |
 | Timeout-abort routing | `delayed` (retry) | `dead` (terminal) | Correctness fix |
-| Protected-name bypass vectors | unknown | 3 (whitespace, case, spread) | All closed |
+| Action Brain failure-mode paths covered | partial | 12/12 | complete |
+| `wacli success=false` behavior | silently empty | throws + degraded | correct |
+| Stale sweep on degraded fetch | supersedes | preserves | correct |
 
-Timeout-abort → `dead` matters in practice: a job that exceeded its wall-clock budget should not keep retrying. The prior `delayed` routing meant a badly-behaved script could loop until `max_attempts` ran out, burning worker time on each attempt.
+Timeout-abort → `dead` matters: a job that exceeded its wall-clock budget should not keep retrying. The prior `delayed` routing meant a badly-behaved script could loop until `max_attempts` ran out. For Action Brain users with flaky WhatsApp thread fetches, pending drafts are now safe — a transient `wacli` failure no longer silently supersedes a good draft.
 
-### What this means for operators
+### What this means for operators and Action Brain users
 
-Your Minions worker can now run shell cron scripts. Set `GBRAIN_ALLOW_SHELL_JOBS=1` on the worker process and submit with `gbrain jobs submit shell --params '{"cmd":"...","cwd":"/abs/path"}'`. Jobs submitted without the worker flag sit in `waiting` — the CLI prints a starvation warning. The audit log at `~/.gbrain/audit/shell-jobs-YYYY-Www.jsonl` tracks every submission for debugging without logging env values (which may carry secrets). Run `gbrain apply-migrations --yes` if upgrading from a prior v0.15.x.
+Shell cron scripts: set `GBRAIN_ALLOW_SHELL_JOBS=1` on the worker and submit with `gbrain jobs submit shell --params '{"cmd":"...","cwd":"/abs/path"}'`. Jobs without the worker flag sit in `waiting` with a starvation warning. The audit log at `~/.gbrain/audit/shell-jobs-YYYY-Www.jsonl` tracks every submission.
+
+Action Brain: the brief still surfaces any pending draft when context fetch is degraded; the next sweep will retry. Run `gbrain upgrade` to get both fixes.
 
 ## To take advantage of v0.15.1
 
@@ -52,18 +103,26 @@ Your Minions worker can now run shell cron scripts. Set `GBRAIN_ALLOW_SHELL_JOBS
 - `src/core/minions/protected-names.ts` — side-effect-free constant module: `PROTECTED_JOB_NAMES = Set(['shell'])`. Imported by both queue and CLI path; must stay pure.
 
 #### Worker abort path fix
-- `src/core/minions/worker.ts` — `ctx.shutdownSignal` (fires only on SIGTERM/SIGINT, separate from per-job `signal`). Shell handler subscribes to both; non-shell handlers ignore `shutdownSignal` and run through the 30s cleanup race naturally. Abort reason is now an `Error` object (not a bare string), enabling structured reason extraction. Timed-out jobs now route to `dead` instead of `delayed` — timeout aborts are terminal.
+- `src/core/minions/worker.ts` — `ctx.shutdownSignal` (fires only on SIGTERM/SIGINT, separate from per-job `signal`). Abort reason is now an `Error` object. Timed-out jobs now route to `dead` instead of `delayed` — timeout aborts are terminal.
 - `src/core/minions/types.ts` — `MinionJobContext.shutdownSignal` field added.
 
 #### Queue guard
-- `src/core/minions/queue.ts` — `MinionQueue.add()` gains a 4th `trusted` arg (`{allowProtectedSubmit: true}`). Protected names are rejected unless the flag is set explicitly. Whitespace bypass closed: name is trimmed before the guard check and before insert.
-- `src/core/operations.ts` — `submit_job` operation rejects protected names from MCP callers (`ctx.remote === true`) before touching the DB. `timeout_ms` field added.
-- `src/commands/jobs.ts` — `--timeout-ms` flag added to CLI submit. Shell submissions emit a starvation warning when `--follow` is not used and the worker env flag may not be set.
+- `src/core/minions/queue.ts` — `MinionQueue.add()` gains a 4th `trusted` arg (`{allowProtectedSubmit: true}`). Protected names are rejected unless the flag is set explicitly. Whitespace bypass closed.
+- `src/core/operations.ts` — `submit_job` rejects protected names from MCP callers (`ctx.remote === true`). `timeout_ms` field added.
+- `src/commands/jobs.ts` — `--timeout-ms` flag added to CLI submit. Shell submissions emit starvation warning when worker env flag may not be set.
+
+#### Action Brain failure-mode hardening (GIT-1063)
+- `fix(action-brain)`: `wacli messages list` returning `success=false` now throws instead of returning an empty array, correctly propagating `context_fetch_degraded = true`
+- `fix(action-brain)`: Stale context sweep skips supersede when `context_fetch_degraded` — fail closed, preserves pending draft
+- `fix(action-brain)`: `action_draft_regenerate` skips with `draft_skipped` event when context fetch is degraded, no new draft inserted
+- `fix(action-brain)`: `doesContextHashMatch` checks both new hash format (includes `context_fetch_degraded`) and legacy format for migration safety
+- `fix(action-brain)`: `action_draft_regenerate` logs `draft_skipped` when recipient unavailable instead of throwing
 
 #### Tests
 - `test/minions-shell.test.ts` — 355-line unit test file: protected-name guard, queue trusted-arg, handler validation, spawn + output, env allowlist, abort (signal + shutdown + pre-abort), SIGKILL escalation, ISO-week audit filename, audit write path, output truncation.
 - `test/e2e/minions-shell.test.ts` — E2E tests against real Postgres (skipped gracefully without `DATABASE_URL`).
 - `test/minions.test.ts` — regression guards updated for abort reason extraction.
+- 12 new Action Brain failure-mode test cases: stale context supersede, hash-unchanged preservation, legacy hash compat, transient degraded skip, `wacli success=false`, cap enforcement, starvation prevention, generation_failed logging, skipped on no_recipient, skipped on degraded context.
 
 #### Docs
 - `docs/guides/minions-shell-jobs.md` — operator guide: security model, env allowlist, audit log, error reference, cron recipe.
