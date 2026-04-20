@@ -140,8 +140,8 @@ interface PendingDraftContextRow {
   id: number;
   action_item_id: number;
   context_hash: string;
-  source_contact: string;
-  source_thread: string;
+  source_contact: string | null;
+  source_thread: string | null;
 }
 
 interface SendCommandResult {
@@ -218,7 +218,13 @@ export const actionBrainOperations: Operation[] = [
     cliHints: { name: 'action-brief' },
     handler: async (ctx, p) => {
       const db = await ensureActionBrainSchema(ctx.engine);
-      await supersedePendingDraftsOnContextHashChange(ctx.engine, db, 'system');
+      if (!ctx.dryRun) {
+        try {
+          await supersedePendingDraftsOnContextHashChange(ctx.engine, db, 'system');
+        } catch (err) {
+          console.error('[action_brief] context-hash sweep failed (non-fatal):', err);
+        }
+      }
       const generator = new MorningBriefGenerator(db);
 
       const brief = await generator.generateMorningBrief({
@@ -690,7 +696,6 @@ export const actionBrainOperations: Operation[] = [
           throw new Error(`Action item not found: ${itemId}`);
         }
 
-        const supersededIds = await supersedePendingDrafts(txDb, itemId);
         const latestDraft = await getLatestDraftForItem(txDb, itemId);
         const recipient = latestDraft?.recipient ?? resolveRecipientForRegeneratedDraft(item);
         if (!recipient) {
@@ -700,7 +705,7 @@ export const actionBrainOperations: Operation[] = [
           });
           return {
             status: 'skipped' as const,
-            superseded_count: supersededIds.length,
+            superseded_count: 0,
           };
         }
 
@@ -712,9 +717,11 @@ export const actionBrainOperations: Operation[] = [
           });
           return {
             status: 'generation_failed' as const,
-            superseded_count: supersededIds.length,
+            superseded_count: 0,
           };
         }
+
+        const supersededIds = await supersedePendingDrafts(txDb, itemId);
         const contextSnapshot = buildRegeneratedContextSnapshot(item, latestDraft, hint);
         const contextHash = hashContextSnapshot(contextSnapshot);
         const inserted = await insertRegeneratedDraft(txDb, {
