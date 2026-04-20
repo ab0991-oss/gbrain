@@ -604,7 +604,7 @@ interface RepairArgs {
 }
 
 async function repairBareTweet(args: RepairArgs): Promise<void> {
-  const { writer, engine, slug, hit, result, handle, dryRun } = args;
+  const { writer, slug, hit, result, handle, dryRun } = args;
   const tweetId = result.value.tweet_id!;
   const createdAt = result.value.created_at!;
   const dateISO = createdAt.slice(0, 10);
@@ -617,16 +617,13 @@ async function repairBareTweet(args: RepairArgs): Promise<void> {
     return;
   }
 
-  const current = await engine.getPage(slug);
-  if (!current) {
-    throw new Error(`repairBareTweet: page not found: ${slug}`);
-  }
-  const nextCompiledTruth = addCitationToLine(current.compiled_truth, hit.line, cite);
-
-  // Keep the repair atomic: mutate compiled_truth + clear grandfather mode in
-  // the same transaction so repaired pages re-enter validator coverage.
+  // Keep the repair atomic: read compiled_truth inside the transaction so the
+  // read and write share the same isolation scope — prevents TOCTOU if two
+  // integrity --auto processes run concurrently against the same brain.
   await writer.transaction(async (tx) => {
-    if (nextCompiledTruth !== current.compiled_truth) {
+    const currentBody = await tx.getCompiledTruth(slug);
+    const nextCompiledTruth = addCitationToLine(currentBody, hit.line, cite);
+    if (nextCompiledTruth !== currentBody) {
       await tx.setCompiledTruth(slug, nextCompiledTruth);
     }
     await tx.setFrontmatterField(slug, 'validate', true);

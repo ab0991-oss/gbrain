@@ -102,6 +102,8 @@ export interface PageValidationContext {
 export interface WriteTx {
   createEntity(input: EntityInput): Promise<string>;
   appendTimeline(slug: string, entry: TimelineInput): Promise<void>;
+  /** Read compiled_truth inside the transaction, so read and write share the same isolation scope. */
+  getCompiledTruth(slug: string): Promise<string>;
   setCompiledTruth(slug: string, body: string): Promise<void>;
   setFrontmatterField(slug: string, key: string, value: unknown): Promise<void>;
   putRawData(slug: string, source: string, data: object): Promise<void>;
@@ -167,6 +169,12 @@ class WriteTxImpl implements WriteTx {
   async appendTimeline(slug: string, entry: TimelineInput): Promise<void> {
     await this.engine.addTimelineEntry(slug, entry);
     this.touchedSlugs.add(slug);
+  }
+
+  async getCompiledTruth(slug: string): Promise<string> {
+    const existing = await this.engine.getPage(slug);
+    if (!existing) throw new WriteError('invalid_input', `getCompiledTruth: page not found: ${slug}`);
+    return existing.compiled_truth;
   }
 
   async setCompiledTruth(slug: string, body: string): Promise<void> {
