@@ -1951,6 +1951,9 @@ async function supersedePendingDraftsOnContextHashChange(
       source_contact: row.source_contact,
       source_thread: row.source_thread,
     });
+    if (context.context_fetch_degraded) {
+      continue;
+    }
 
     const previousHash = row.context_hash;
     const nextHash = context.context_hash;

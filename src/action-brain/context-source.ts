@@ -32,6 +32,7 @@ export interface ActionDraftContextSourceResult {
   gbrain_page_slugs: string[];
   excerpts: ActionDraftContextExcerpt[];
   thread: ActionDraftContextThreadMessage[];
+  context_fetch_degraded: boolean;
   context_hash: string;
 }
 
@@ -45,6 +46,11 @@ export type ActionDraftThreadMessagesRunner = (request: {
   limit: number;
 }) => Promise<ActionDraftContextThreadMessage[]>;
 
+interface ResolveThreadMessagesResult {
+  thread: ActionDraftContextThreadMessage[];
+  degraded: boolean;
+}
+
 export async function buildActionDraftContextSource(
   engine: BrainEngine,
   input: ActionDraftContextSourceInput,
@@ -54,6 +60,7 @@ export async function buildActionDraftContextSource(
   const sourceThread = normalizeOptionalString(input.source_thread);
 
   let excerpts: ActionDraftContextExcerpt[] = [];
+  let contextFetchDegraded = false;
   if (sourceContact) {
     try {
       const keywordHits = await engine.searchKeyword(sourceContact, {
@@ -64,16 +71,22 @@ export async function buildActionDraftContextSource(
       excerpts = await buildExcerpts(engine, slugs);
     } catch {
       excerpts = [];
+      contextFetchDegraded = true;
     }
   }
 
-  const thread = await resolveThreadMessages(sourceThread, options);
+  const threadResult = await resolveThreadMessages(sourceThread, options);
+  if (threadResult.degraded) {
+    contextFetchDegraded = true;
+  }
+  const thread = threadResult.thread;
   const cappedThread = capThreadByCharsOldestFirst(thread, excerpts, ACTION_DRAFT_CONTEXT_MAX_CHARS);
 
   const result: ActionDraftContextSourceResult = {
     gbrain_page_slugs: excerpts.map((excerpt) => excerpt.slug),
     excerpts,
     thread: cappedThread,
+    context_fetch_degraded: contextFetchDegraded,
     context_hash: '',
   };
 
@@ -106,25 +119,34 @@ async function buildExcerpts(engine: BrainEngine, slugs: string[]): Promise<Acti
 async function resolveThreadMessages(
   sourceThread: string | null,
   options: BuildActionDraftContextSourceOptions
-): Promise<ActionDraftContextThreadMessage[]> {
+): Promise<ResolveThreadMessagesResult> {
   if (!sourceThread) {
-    return [];
+    return { thread: [], degraded: false };
   }
 
   if (options.threadMessages) {
-    return normalizeThreadMessages(options.threadMessages);
+    return {
+      thread: normalizeThreadMessages(options.threadMessages),
+      degraded: false,
+    };
   }
 
   const runner = options.threadMessagesRunner ?? runWacliThreadMessages;
   try {
-    return normalizeThreadMessages(
-      await runner({
-        thread: sourceThread,
-        limit: ACTION_DRAFT_CONTEXT_THREAD_MESSAGE_LIMIT,
-      })
-    );
+    return {
+      thread: normalizeThreadMessages(
+        await runner({
+          thread: sourceThread,
+          limit: ACTION_DRAFT_CONTEXT_THREAD_MESSAGE_LIMIT,
+        })
+      ),
+      degraded: false,
+    };
   } catch {
-    return [];
+    return {
+      thread: [],
+      degraded: true,
+    };
   }
 }
 
@@ -197,7 +219,7 @@ async function runWacliThreadMessages(request: {
   };
 
   if (!payload.success || !Array.isArray(payload.data?.messages)) {
-    return [];
+    throw new Error('wacli thread message lookup failed');
   }
 
   return payload.data.messages.map((message) => ({
