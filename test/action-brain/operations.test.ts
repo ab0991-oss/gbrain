@@ -1,10 +1,14 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { mergeOperationSets, operations } from '../../src/core/operations.ts';
 import type { Operation, OperationContext } from '../../src/core/operations.ts';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
-import { actionBrainOperations } from '../../src/action-brain/operations.ts';
+import { actionBrainOperations, setActionDraftSendExecutorForTests } from '../../src/action-brain/operations.ts';
 
 setDefaultTimeout(15_000);
+
+afterEach(() => {
+  setActionDraftSendExecutorForTests(null);
+});
 
 function makeOperation(name: string, cliName?: string): Operation {
   return {
@@ -53,6 +57,51 @@ async function withActionContext<T>(
   }
 }
 
+async function seedActionItemAndDraft(
+  engine: PGLiteEngine,
+  input?: {
+    title?: string;
+    priorityScore?: number;
+    recipient?: string;
+    draftText?: string;
+    version?: number;
+    status?: string;
+    contextHash?: string;
+  }
+): Promise<{ itemId: number; draftId: number }> {
+  const db = (engine as unknown as EngineWithDb).db;
+  const item = await db.query(
+    `INSERT INTO action_items (title, type, status, source_message_id, source_contact, priority_score)
+     VALUES ($1, 'follow_up', 'waiting_on', $2, 'joe@c.us', $3)
+     RETURNING id`,
+    [
+      input?.title ?? 'Follow up with Joe',
+      `seed-msg-${Math.random().toString(36).slice(2, 10)}`,
+      input?.priorityScore ?? 50,
+    ]
+  );
+  const itemId = Number((item.rows[0] as { id: number | string }).id);
+
+  const draft = await db.query(
+    `INSERT INTO action_drafts (
+       action_item_id, version, status, channel, recipient, draft_text, model, context_hash, context_snapshot
+     )
+     VALUES ($1, $2, $3, 'whatsapp', $4, $5, 'claude-sonnet', $6, '{"source":"test"}'::jsonb)
+     RETURNING id`,
+    [
+      itemId,
+      input?.version ?? 1,
+      input?.status ?? 'pending',
+      input?.recipient ?? 'joe@c.us',
+      input?.draftText ?? 'Please send the updated docs by EOD.',
+      input?.contextHash ?? 'ctx-hash-1',
+    ]
+  );
+  const draftId = Number((draft.rows[0] as { id: number | string }).id);
+
+  return { itemId, draftId };
+}
+
 describe('Action Brain operation integration', () => {
   test('#22 registers Action Brain operations in the shared contract', () => {
     const names = new Set(operations.map((op) => op.name));
@@ -60,6 +109,12 @@ describe('Action Brain operation integration', () => {
     expect(names.has('action_brief')).toBe(true);
     expect(names.has('action_resolve')).toBe(true);
     expect(names.has('action_mark_fp')).toBe(true);
+    expect(names.has('action_draft_list')).toBe(true);
+    expect(names.has('action_draft_show')).toBe(true);
+    expect(names.has('action_draft_approve')).toBe(true);
+    expect(names.has('action_draft_reject')).toBe(true);
+    expect(names.has('action_draft_edit')).toBe(true);
+    expect(names.has('action_draft_regenerate')).toBe(true);
     expect(names.has('action_ingest')).toBe(true);
   });
 
@@ -85,6 +140,216 @@ describe('Action Brain operation integration', () => {
 
     expect(exitCode).toBe(0);
     expect(stdout).toContain('Usage: gbrain action list');
+  });
+
+  test('supports grouped action draft CLI commands via "gbrain action draft <subcommand>"', async () => {
+    const proc = Bun.spawn(['bun', 'run', 'src/cli.ts', 'action', 'draft', 'show', '--help'], {
+      cwd: new URL('../..', import.meta.url).pathname,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+
+    const stdout = await new Response(proc.stdout).text();
+    const exitCode = await proc.exited;
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain('Usage: gbrain action draft show');
+  });
+
+  test('action_draft_approve performs pending->approved->sent once and uses safe argv for wacli send', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const { draftId, itemId } = await seedActionItemAndDraft(engine, {
+        draftText: 'Hi Joe; $(touch /tmp/owned)',
+      });
+      const db = (engine as unknown as EngineWithDb).db;
+      const actionDraftApprove = getActionOperation('action_draft_approve');
+
+      const calls: Array<{ command: string; args: string[]; timeoutMs: number }> = [];
+      setActionDraftSendExecutorForTests(async (command, args, options) => {
+        calls.push({ command, args: [...args], timeoutMs: options.timeoutMs });
+        return { stdout: 'ok', stderr: '' };
+      });
+
+      try {
+        const first = await actionDraftApprove.handler(ctx, { id: draftId });
+        const second = await actionDraftApprove.handler(ctx, { id: draftId });
+
+        expect(first.status).toBe('sent');
+        expect(second.status).toBe('already_processed');
+        expect(second.draft_status).toBe('sent');
+
+        expect(calls.length).toBe(1);
+        expect(calls[0]?.command).toBe('wacli');
+        expect(calls[0]?.args).toEqual([
+          'send',
+          'text',
+          '--to',
+          'joe@c.us',
+          '--message',
+          'Hi Joe; $(touch /tmp/owned)',
+        ]);
+        expect(calls[0]?.timeoutMs).toBe(30_000);
+
+        const draftRow = await db.query(
+          `SELECT status, send_error
+           FROM action_drafts
+           WHERE id = $1`,
+          [draftId]
+        );
+        expect(draftRow.rows[0]?.status).toBe('sent');
+        expect(draftRow.rows[0]?.send_error).toBeNull();
+
+        const actionRow = await db.query(
+          `SELECT status
+           FROM action_items
+           WHERE id = $1`,
+          [itemId]
+        );
+        expect(actionRow.rows[0]?.status).toBe('in_progress');
+
+        const history = await db.query(
+          `SELECT event_type
+           FROM action_history
+           WHERE item_id = $1
+           ORDER BY id`,
+          [itemId]
+        );
+        const eventTypes = history.rows.map((row) => row.event_type);
+        expect(eventTypes).toContain('draft_approved');
+        expect(eventTypes).toContain('draft_sent');
+      } finally {
+        setActionDraftSendExecutorForTests(null);
+      }
+    });
+  });
+
+  test('action_draft_approve marks send_failed and records history when send fails', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const { draftId, itemId } = await seedActionItemAndDraft(engine);
+      const db = (engine as unknown as EngineWithDb).db;
+      const actionDraftApprove = getActionOperation('action_draft_approve');
+
+      setActionDraftSendExecutorForTests(async () => {
+        throw new Error('timed out after 30000ms');
+      });
+
+      try {
+        const result = await actionDraftApprove.handler(ctx, { id: draftId });
+        expect(result.status).toBe('send_failed');
+
+        const draftRow = await db.query(
+          `SELECT status, send_error
+           FROM action_drafts
+           WHERE id = $1`,
+          [draftId]
+        );
+        expect(draftRow.rows[0]?.status).toBe('send_failed');
+        expect(String(draftRow.rows[0]?.send_error)).toContain('timed out');
+
+        const history = await db.query(
+          `SELECT event_type
+           FROM action_history
+           WHERE item_id = $1
+           ORDER BY id`,
+          [itemId]
+        );
+        const eventTypes = history.rows.map((row) => row.event_type);
+        expect(eventTypes).toContain('draft_approved');
+        expect(eventTypes).toContain('draft_send_failed');
+      } finally {
+        setActionDraftSendExecutorForTests(null);
+      }
+    });
+  });
+
+  test('action_draft_reject, action_draft_edit, and action_draft_regenerate emit expected history events', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const db = (engine as unknown as EngineWithDb).db;
+      const actionDraftReject = getActionOperation('action_draft_reject');
+      const actionDraftEdit = getActionOperation('action_draft_edit');
+      const actionDraftRegenerate = getActionOperation('action_draft_regenerate');
+
+      const rejectSeed = await seedActionItemAndDraft(engine, {
+        title: 'Reject path',
+        priorityScore: 11,
+      });
+      const editSeed = await seedActionItemAndDraft(engine, {
+        title: 'Edit path',
+        priorityScore: 22,
+        draftText: 'old text',
+      });
+      const regenSeed = await seedActionItemAndDraft(engine, {
+        title: 'Regenerate path',
+        priorityScore: 33,
+        version: 3,
+        draftText: 'regen text',
+      });
+
+      const rejectResult = await actionDraftReject.handler(ctx, {
+        id: rejectSeed.draftId,
+        reason: 'tone too sharp',
+      });
+      expect(rejectResult.status).toBe('rejected');
+
+      const editResult = await actionDraftEdit.handler(ctx, {
+        id: editSeed.draftId,
+        text: 'new text',
+      });
+      expect(editResult.status).toBe('edited');
+
+      const regenerateResult = await actionDraftRegenerate.handler(ctx, {
+        item_id: regenSeed.itemId,
+        hint: 'softer tone',
+      });
+      expect(regenerateResult.status).toBe('regenerated');
+      expect(regenerateResult.draft.version).toBe(4);
+      expect(regenerateResult.superseded_count).toBe(1);
+
+      const regenStatuses = await db.query(
+        `SELECT id, status, version
+         FROM action_drafts
+         WHERE action_item_id = $1
+         ORDER BY version`,
+        [regenSeed.itemId]
+      );
+      expect(regenStatuses.rows.length).toBe(2);
+      expect(regenStatuses.rows[0]?.status).toBe('superseded');
+      expect(regenStatuses.rows[1]?.status).toBe('pending');
+
+      const rejectHistory = await db.query(
+        `SELECT event_type
+         FROM action_history
+         WHERE item_id = $1
+         ORDER BY id`,
+        [rejectSeed.itemId]
+      );
+      expect(rejectHistory.rows.map((row) => row.event_type)).toContain('draft_rejected');
+
+      const editHistory = await db.query(
+        `SELECT event_type
+         FROM action_history
+         WHERE item_id = $1
+         ORDER BY id`,
+        [editSeed.itemId]
+      );
+      expect(editHistory.rows.map((row) => row.event_type)).toContain('draft_edited');
+
+      const regenHistory = await db.query(
+        `SELECT event_type, metadata
+         FROM action_history
+         WHERE item_id = $1
+         ORDER BY id`,
+        [regenSeed.itemId]
+      );
+      const regenEvents = regenHistory.rows.map((row) => row.event_type);
+      expect(regenEvents).toContain('draft_created');
+      const createdEvent = regenHistory.rows.find((row) => row.event_type === 'draft_created');
+      expect(createdEvent).toBeDefined();
+      const metadataValue = createdEvent?.metadata;
+      const metadataRecord =
+        metadataValue && typeof metadataValue === 'string' ? JSON.parse(metadataValue) : metadataValue;
+      expect(metadataRecord?.regenerated).toBe(true);
+    });
   });
 
   describe('action_ingest integration', () => {
