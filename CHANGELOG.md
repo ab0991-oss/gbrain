@@ -2,6 +2,51 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.15.2] - 2026-04-21
+
+**Action Brain sweep hardening: supersede-stranding eliminated, brief unblockable.**
+
+Three correctness fixes found via adversarial review of the v0.15.1 failure-mode changes. The `generation_failed` and `no_recipient` paths in `action_draft_regenerate` previously committed a supersede of existing pending drafts before discovering that no new draft could be inserted — leaving the action item permanently stranded with zero pending drafts. Fixed by moving supersede to after pre-generation validation. The `supersedePendingDraftsOnContextHashChange` sweep in `action_brief` previously propagated any DB or subprocess error to the caller, which would prevent the morning brief from generating at all. Fixed with a non-fatal try/catch. Dry-run `action_brief` calls no longer mutate state.
+
+### The numbers that matter
+
+Source: `bun test test/action-brain/operations.test.ts` on the fixed branch.
+
+| Metric | Before | After | Δ |
+|--------|--------|-------|---|
+| action_brief resilience to sweep failures | fatal | non-fatal | correct |
+| generation_failed draft stranding | yes | no | fixed |
+| no_recipient draft stranding | yes | no | fixed |
+| dry-run action_brief mutates state | yes | no | fixed |
+| Tests | 1796 | 1796 | 0 regressions |
+
+### What this means for Action Brain users
+
+Your morning brief will generate even if the context-hash sweep hits a transient DB error or wacli subprocess failure. Draft regeneration failures no longer silently orphan action items with no pending drafts. Run `gbrain upgrade` to get the fix.
+
+## To take advantage of v0.15.2
+
+`gbrain upgrade` should do this automatically. If it didn't:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Verify:**
+   ```bash
+   gbrain action brief
+   gbrain stats
+   ```
+3. **If any step fails,** file an issue with `gbrain doctor` output.
+
+### Itemized changes
+
+#### Action Brain
+- `fix(action-brain)`: Move `supersedePendingDrafts` after recipient and draft-text validation in `action_draft_regenerate` — generation_failed and no_recipient paths no longer commit a supersede without inserting a replacement draft
+- `fix(action-brain)`: Wrap `supersedePendingDraftsOnContextHashChange` in try/catch in `action_brief` — sweep failures are non-fatal, brief generation always completes
+- `fix(action-brain)`: Guard context-hash sweep with `ctx.dryRun` check — dry-run briefs no longer mutate draft state
+- `fix(action-brain)`: Type `PendingDraftContextRow.source_contact/source_thread` as `string | null` to match DB reality
+
 ## [0.15.1] - 2026-04-21
 
 **Shell jobs ship + Action Brain failure-mode hardening. Two correctness fixes in one patch.**
