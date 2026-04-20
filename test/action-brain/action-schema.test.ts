@@ -165,4 +165,61 @@ describe('Action Brain schema', () => {
     expect(afterCount).toBe(beforeCount);
     expect(rowCount).toBe(1);
   });
+
+  test('upgrades legacy action_history event_type constraint to include draft events', async () => {
+    const localDb = await createDb();
+
+    await initActionSchema(localDb);
+
+    await localDb.query(
+      `ALTER TABLE action_history
+       DROP CONSTRAINT IF EXISTS action_history_event_type_check`
+    );
+    await localDb.query(
+      `ALTER TABLE action_history
+       ADD CONSTRAINT action_history_event_type_check
+       CHECK (
+         event_type IN (
+           'created',
+           'status_change',
+           'reminded',
+           'escalated',
+           'resolved',
+           'dropped'
+         )
+       )`
+    );
+
+    const inserted = await localDb.query(
+      `INSERT INTO action_items (title, type, source_message_id)
+       VALUES ('Legacy upgrade path', 'follow_up', 'msg-legacy-constraint-001')
+       RETURNING id`
+    );
+    const itemId = Number((inserted.rows[0] as { id: number | string }).id);
+
+    await expect(
+      localDb.query(
+        `INSERT INTO action_history (item_id, event_type, actor, metadata)
+         VALUES ($1, 'draft_generation_failed', 'system', '{}'::jsonb)`,
+        [itemId]
+      )
+    ).rejects.toThrow();
+
+    await initActionSchema(localDb);
+
+    await localDb.query(
+      `INSERT INTO action_history (item_id, event_type, actor, metadata)
+       VALUES ($1, 'draft_generation_failed', 'system', '{}'::jsonb)`,
+      [itemId]
+    );
+
+    const historyRows = await localDb.query(
+      `SELECT event_type
+       FROM action_history
+       WHERE item_id = $1`,
+      [itemId]
+    );
+    const eventTypes = (historyRows.rows as { event_type: string }[]).map((row) => row.event_type);
+    expect(eventTypes).toEqual(['draft_generation_failed']);
+  });
 });

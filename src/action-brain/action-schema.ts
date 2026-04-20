@@ -1,3 +1,38 @@
+const ACTION_HISTORY_EVENT_TYPES = [
+  'created',
+  'status_change',
+  'reminded',
+  'escalated',
+  'resolved',
+  'dropped',
+  'draft_created',
+  'draft_approved',
+  'draft_edited',
+  'draft_rejected',
+  'draft_sent',
+  'draft_send_failed',
+  'draft_regenerate',
+  'draft_skipped',
+  'draft_superseded',
+  'draft_generation_failed',
+  'draft_injection_suspected',
+] as const;
+
+const ACTION_HISTORY_EVENT_TYPES_SQL = ACTION_HISTORY_EVENT_TYPES.map((eventType) => `'${eventType}'`).join(',\n      ');
+
+const ACTION_HISTORY_EVENT_TYPE_MIGRATION_SQL = `
+ALTER TABLE IF EXISTS action_history
+DROP CONSTRAINT IF EXISTS action_history_event_type_check;
+
+ALTER TABLE IF EXISTS action_history
+ADD CONSTRAINT action_history_event_type_check
+CHECK (
+  event_type IN (
+      ${ACTION_HISTORY_EVENT_TYPES_SQL}
+  )
+);
+`;
+
 export const ACTION_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS action_items (
   id                  SERIAL PRIMARY KEY,
@@ -30,23 +65,7 @@ CREATE TABLE IF NOT EXISTS action_history (
   item_id     INTEGER NOT NULL REFERENCES action_items(id) ON DELETE CASCADE,
   event_type  TEXT NOT NULL CHECK (
     event_type IN (
-      'created',
-      'status_change',
-      'reminded',
-      'escalated',
-      'resolved',
-      'dropped',
-      'draft_created',
-      'draft_approved',
-      'draft_edited',
-      'draft_rejected',
-      'draft_sent',
-      'draft_send_failed',
-      'draft_regenerate',
-      'draft_skipped',
-      'draft_superseded',
-      'draft_generation_failed',
-      'draft_injection_suspected'
+      ${ACTION_HISTORY_EVENT_TYPES_SQL}
     )
   ),
   timestamp   TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -96,4 +115,5 @@ CREATE INDEX IF NOT EXISTS idx_action_drops_source_id ON action_drops(source_id)
 
 export async function initActionSchema(db: { exec: (sql: string) => Promise<unknown> }): Promise<void> {
   await db.exec(ACTION_SCHEMA_SQL);
+  await db.exec(ACTION_HISTORY_EVENT_TYPE_MIGRATION_SQL);
 }
