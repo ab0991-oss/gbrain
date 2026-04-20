@@ -7,6 +7,7 @@ import {
   ACTION_DRAFT_CONTEXT_MAX_CHARS,
   ACTION_DRAFT_CONTEXT_PAGE_EXCERPT_MAX_CHARS,
   ACTION_DRAFT_CONTEXT_PAGE_LIMIT,
+  ACTION_DRAFT_CONTEXT_THREAD_FETCH_TIMEOUT_MS,
   buildActionDraftContextSource,
 } from '../../src/action-brain/context-source.ts';
 
@@ -174,6 +175,49 @@ describe('buildActionDraftContextSource', () => {
     expect(context.context_fetch_degraded).toBe(true);
     expect(context.thread).toEqual([]);
     expect(context.gbrain_page_slugs).toEqual(['people/alice']);
+  });
+
+  test('uses configured thread fetch timeout when resolving thread messages', async () => {
+    const engine = createEngine();
+    let timeoutSeen = 0;
+
+    await buildActionDraftContextSource(
+      engine,
+      {
+        source_contact: '',
+        source_thread: 'ops-thread',
+      },
+      {
+        threadFetchTimeoutMs: 1234,
+        threadMessagesRunner: async ({ timeoutMs }) => {
+          timeoutSeen = timeoutMs;
+          return [];
+        },
+      }
+    );
+
+    expect(timeoutSeen).toBe(1234);
+  });
+
+  test('uses default thread fetch timeout when no override is provided', async () => {
+    const engine = createEngine();
+    let timeoutSeen = 0;
+
+    await buildActionDraftContextSource(
+      engine,
+      {
+        source_contact: '',
+        source_thread: 'ops-thread',
+      },
+      {
+        threadMessagesRunner: async ({ timeoutMs }) => {
+          timeoutSeen = timeoutMs;
+          return [];
+        },
+      }
+    );
+
+    expect(timeoutSeen).toBe(ACTION_DRAFT_CONTEXT_THREAD_FETCH_TIMEOUT_MS);
   });
 
   test('marks context as degraded when wacli thread fetch returns success=false payload', async () => {

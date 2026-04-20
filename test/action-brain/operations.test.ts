@@ -6,11 +6,12 @@ import { mergeOperationSets, operations } from '../../src/core/operations.ts';
 import type { Operation, OperationContext } from '../../src/core/operations.ts';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import {
+  ACTION_BRIEF_STALE_CONTEXT_SWEEP_CAP,
   actionBrainOperations,
   setActionDraftRegenerateTextBuilderForTests,
   setActionDraftSendExecutorForTests,
 } from '../../src/action-brain/operations.ts';
-import { buildActionDraftContextSource } from '../../src/action-brain/context-source.ts';
+import { buildActionDraftContextSource, computeActionDraftContextHashLegacy } from '../../src/action-brain/context-source.ts';
 
 setDefaultTimeout(15_000);
 
@@ -992,6 +993,50 @@ describe('Action Brain operation integration', () => {
     });
   });
 
+  test('action_brief keeps pending drafts when stored hash matches legacy context hash shape', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const db = (engine as unknown as EngineWithDb).db;
+      const actionBrief = getActionOperation('action_brief');
+
+      const { itemId, draftId } = await seedActionItemAndDraft(engine, {
+        sourceContact: '',
+        sourceThread: '',
+      });
+      const currentContext = await buildActionDraftContextSource(engine, {
+        source_contact: '',
+        source_thread: '',
+      });
+      const legacyHash = computeActionDraftContextHashLegacy(currentContext);
+      expect(legacyHash).not.toBe(currentContext.context_hash);
+
+      await db.query(
+        `UPDATE action_drafts
+         SET context_hash = $2
+         WHERE id = $1`,
+        [draftId, legacyHash]
+      );
+
+      await actionBrief.handler(ctx, {});
+
+      const draftRow = await db.query(
+        `SELECT status
+         FROM action_drafts
+         WHERE id = $1`,
+        [draftId]
+      );
+      expect(draftRow.rows[0]?.status).toBe('pending');
+
+      const supersededCount = await db.query(
+        `SELECT count(*)::int AS n
+         FROM action_history
+         WHERE item_id = $1
+           AND event_type = 'draft_superseded'`,
+        [itemId]
+      );
+      expect(Number((supersededCount.rows[0] as { n: number | string }).n)).toBe(0);
+    });
+  });
+
   test('action_brief keeps pending drafts when context-source lookup is transiently degraded', async () => {
     await withActionContext(async (ctx, engine) => {
       const db = (engine as unknown as EngineWithDb).db;
@@ -1068,6 +1113,42 @@ describe('Action Brain operation integration', () => {
         [itemId]
       );
       expect(Number((history.rows[0] as { n: number | string }).n)).toBe(0);
+    });
+  });
+
+  test('action_brief stale-context sweep is capped to avoid unbounded supersede work', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const db = (engine as unknown as EngineWithDb).db;
+      const actionBrief = getActionOperation('action_brief');
+      const totalDrafts = ACTION_BRIEF_STALE_CONTEXT_SWEEP_CAP + 5;
+
+      for (let idx = 0; idx < totalDrafts; idx += 1) {
+        await seedActionItemAndDraft(engine, {
+          title: `Cap test ${idx}`,
+          sourceContact: '',
+          sourceThread: '',
+          contextHash: `stale-hash-${idx}`,
+        });
+      }
+
+      const result = await actionBrief.handler(ctx, {});
+      expect(typeof result.brief).toBe('string');
+
+      const supersededCount = await db.query(
+        `SELECT count(*)::int AS n
+         FROM action_drafts
+         WHERE status = 'superseded'`
+      );
+      expect(Number((supersededCount.rows[0] as { n: number | string }).n)).toBe(ACTION_BRIEF_STALE_CONTEXT_SWEEP_CAP);
+
+      const pendingCount = await db.query(
+        `SELECT count(*)::int AS n
+         FROM action_drafts
+         WHERE status = 'pending'`
+      );
+      expect(Number((pendingCount.rows[0] as { n: number | string }).n)).toBe(
+        totalDrafts - ACTION_BRIEF_STALE_CONTEXT_SWEEP_CAP
+      );
     });
   });
 

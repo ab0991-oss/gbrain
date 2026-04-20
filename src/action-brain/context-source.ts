@@ -9,6 +9,7 @@ export const ACTION_DRAFT_CONTEXT_PAGE_LIMIT = 3;
 export const ACTION_DRAFT_CONTEXT_PAGE_EXCERPT_MAX_CHARS = 800;
 export const ACTION_DRAFT_CONTEXT_THREAD_MESSAGE_LIMIT = 10;
 export const ACTION_DRAFT_CONTEXT_MAX_CHARS = 4000;
+export const ACTION_DRAFT_CONTEXT_THREAD_FETCH_TIMEOUT_MS = 5_000;
 const KEYWORD_SEARCH_LIMIT = 20;
 const ENTITY_SLUG_PREFIXES = ['people/', 'companies/'] as const;
 
@@ -39,12 +40,19 @@ export interface ActionDraftContextSourceResult {
 export interface BuildActionDraftContextSourceOptions {
   threadMessages?: ActionDraftContextThreadMessage[];
   threadMessagesRunner?: ActionDraftThreadMessagesRunner;
+  threadFetchTimeoutMs?: number;
 }
 
 export type ActionDraftThreadMessagesRunner = (request: {
   thread: string;
   limit: number;
+  timeoutMs: number;
 }) => Promise<ActionDraftContextThreadMessage[]>;
+
+type ActionDraftContextHashInput = Pick<
+  ActionDraftContextSourceResult,
+  'gbrain_page_slugs' | 'excerpts' | 'thread' | 'context_fetch_degraded'
+>;
 
 export async function buildActionDraftContextSource(
   engine: BrainEngine,
@@ -88,11 +96,32 @@ export async function buildActionDraftContextSource(
     context_hash: '',
   };
 
-  result.context_hash = sha256(stableStringify(result));
+  result.context_hash = computeActionDraftContextHash(result);
   return result;
 }
 
 export const buildContextSource = buildActionDraftContextSource;
+
+export function computeActionDraftContextHash(input: ActionDraftContextHashInput): string {
+  return sha256(
+    stableStringify({
+      gbrain_page_slugs: input.gbrain_page_slugs,
+      excerpts: input.excerpts,
+      thread: input.thread,
+      context_fetch_degraded: input.context_fetch_degraded,
+    })
+  );
+}
+
+export function computeActionDraftContextHashLegacy(input: ActionDraftContextHashInput): string {
+  return sha256(
+    stableStringify({
+      gbrain_page_slugs: input.gbrain_page_slugs,
+      excerpts: input.excerpts,
+      thread: input.thread,
+    })
+  );
+}
 
 async function buildExcerpts(engine: BrainEngine, slugs: string[]): Promise<ActionDraftContextExcerpt[]> {
   const excerpts: ActionDraftContextExcerpt[] = [];
@@ -130,12 +159,14 @@ async function resolveThreadMessages(
   }
 
   const runner = options.threadMessagesRunner ?? runWacliThreadMessages;
+  const timeoutMs = options.threadFetchTimeoutMs ?? ACTION_DRAFT_CONTEXT_THREAD_FETCH_TIMEOUT_MS;
   try {
     return {
       messages: normalizeThreadMessages(
         await runner({
           thread: sourceThread,
           limit: ACTION_DRAFT_CONTEXT_THREAD_MESSAGE_LIMIT,
+          timeoutMs,
         })
       ),
       degraded: false,
@@ -202,9 +233,11 @@ function capThreadByCharsOldestFirst(
 async function runWacliThreadMessages(request: {
   thread: string;
   limit: number;
+  timeoutMs: number;
 }): Promise<ActionDraftContextThreadMessage[]> {
   const args = ['messages', 'list', '--thread', request.thread, '--limit', String(request.limit), '--json'];
   const result = await execFileAsync('wacli', args, {
+    timeout: request.timeoutMs,
     maxBuffer: 16 * 1024 * 1024,
   });
 

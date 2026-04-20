@@ -5,7 +5,11 @@ import type { BrainEngine } from '../core/engine.ts';
 import type { Operation } from '../core/operations.ts';
 import { ActionEngine, ActionItemNotFoundError, ActionTransitionError } from './action-engine.ts';
 import { MorningBriefGenerator } from './brief.ts';
-import { buildActionDraftContextSource } from './context-source.ts';
+import {
+  ACTION_DRAFT_CONTEXT_THREAD_FETCH_TIMEOUT_MS,
+  buildActionDraftContextSource,
+  computeActionDraftContextHashLegacy,
+} from './context-source.ts';
 import {
   createEmptyExtractionRunSummary,
   extractCommitmentsWithSummary,
@@ -45,6 +49,9 @@ const ACTION_DRAFT_DEFAULT_MODEL = 'manual';
 const ENTITY_LINK_SEARCH_LIMIT = 20;
 export const ACTION_BRIEF_SOURCE_CONTACT_LOOKUP_CONCURRENCY = 4;
 export const ACTION_BRIEF_SOURCE_CONTACT_LOOKUP_CAP = 24;
+export const ACTION_BRIEF_STALE_CONTEXT_SWEEP_CONCURRENCY = 4;
+export const ACTION_BRIEF_STALE_CONTEXT_SWEEP_CAP = 24;
+const ACTION_BRIEF_STALE_CONTEXT_THREAD_FETCH_TIMEOUT_MS = ACTION_DRAFT_CONTEXT_THREAD_FETCH_TIMEOUT_MS;
 const execFileAsync = promisify(execFile);
 const initializedEngines = new WeakSet<object>();
 const postgresDbCache = new WeakMap<object, QueryableDb>();
@@ -1827,44 +1834,71 @@ async function supersedePendingDraftsWithStaleContext(
      INNER JOIN action_items ai ON ai.id = d.action_item_id
      WHERE d.status = 'pending'
        AND ai.status NOT IN ('resolved', 'dropped')
-     ORDER BY d.id ASC`
+     ORDER BY d.id ASC
+     LIMIT $1`,
+    [ACTION_BRIEF_STALE_CONTEXT_SWEEP_CAP]
   );
 
-  for (const row of result.rows) {
-    const currentContext = await buildActionDraftContextSource(engine, {
-      source_contact: row.source_contact,
-      source_thread: row.source_thread,
-    });
-    if (currentContext.context_fetch_degraded) {
-      continue;
-    }
-    if (currentContext.context_hash === row.context_hash) {
-      continue;
-    }
+  for (let offset = 0; offset < result.rows.length; offset += ACTION_BRIEF_STALE_CONTEXT_SWEEP_CONCURRENCY) {
+    const batch = result.rows.slice(offset, offset + ACTION_BRIEF_STALE_CONTEXT_SWEEP_CONCURRENCY);
+    await Promise.all(
+      batch.map(async (row) => {
+        try {
+          const currentContext = await buildActionDraftContextSource(
+            engine,
+            {
+              source_contact: row.source_contact,
+              source_thread: row.source_thread,
+            },
+            {
+              threadFetchTimeoutMs: ACTION_BRIEF_STALE_CONTEXT_THREAD_FETCH_TIMEOUT_MS,
+            }
+          );
+          if (currentContext.context_fetch_degraded) {
+            return;
+          }
+          if (doesContextHashMatch(row.context_hash, currentContext)) {
+            return;
+          }
 
-    await withDbTransaction(db, async (txDb) => {
-      const updated = await txDb.query<{ id: number; action_item_id: number }>(
-        `UPDATE action_drafts
-         SET status = 'superseded'
-         WHERE id = $1
-           AND status = 'pending'
-         RETURNING id, action_item_id`,
-        [row.draft_id]
-      );
+          await withDbTransaction(db, async (txDb) => {
+            const updated = await txDb.query<{ id: number; action_item_id: number }>(
+              `UPDATE action_drafts
+               SET status = 'superseded'
+               WHERE id = $1
+                 AND status = 'pending'
+               RETURNING id, action_item_id`,
+              [row.draft_id]
+            );
 
-      const draft = updated.rows[0];
-      if (!draft) {
-        return;
-      }
+            const draft = updated.rows[0];
+            if (!draft) {
+              return;
+            }
 
-      await insertActionHistory(txDb, Number(draft.action_item_id), 'draft_superseded', actor, {
-        draft_id: Number(draft.id),
-        reason: 'context_hash_changed',
-        previous_context_hash: row.context_hash,
-        current_context_hash: currentContext.context_hash,
-      });
-    });
+            await insertActionHistory(txDb, Number(draft.action_item_id), 'draft_superseded', actor, {
+              draft_id: Number(draft.id),
+              reason: 'context_hash_changed',
+              previous_context_hash: row.context_hash,
+              current_context_hash: currentContext.context_hash,
+            });
+          });
+        } catch {
+          // Fail closed during stale sweep: transient context rebuild errors must not supersede drafts.
+        }
+      })
+    );
   }
+}
+
+function doesContextHashMatch(
+  storedContextHash: string,
+  currentContext: Parameters<typeof computeActionDraftContextHashLegacy>[0] & { context_hash: string }
+): boolean {
+  if (storedContextHash === currentContext.context_hash) {
+    return true;
+  }
+  return storedContextHash === computeActionDraftContextHashLegacy(currentContext);
 }
 
 function buildTerminalDraftGenerationFailureSummary(): Record<string, number> {
