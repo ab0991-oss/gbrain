@@ -406,6 +406,22 @@ export const actionBrainOperations: Operation[] = [
           };
         }
 
+        if (current.status === 'sending' && retry) {
+          const hasDeliveryConfirmation = await hasDraftDeliveryConfirmation(
+            txDb,
+            current.action_item_id,
+            current.id
+          );
+          if (hasDeliveryConfirmation) {
+            return {
+              claimed: true as const,
+              resumedFromStatus: 'sending' as const,
+              draft: current,
+              reconcileWithoutResend: true as const,
+            };
+          }
+        }
+
         if (current.status !== 'pending') {
           return {
             claimed: false as const,
@@ -452,7 +468,8 @@ export const actionBrainOperations: Operation[] = [
       });
 
       if (!claimed.claimed) {
-        const retryRequired = claimed.draft.status === 'approved' || claimed.draft.status === 'send_failed';
+        const retryRequired =
+          claimed.draft.status === 'approved' || claimed.draft.status === 'send_failed' || claimed.draft.status === 'sending';
         return {
           status: 'already_processed',
           draft_id: claimed.draft.id,
@@ -1513,7 +1530,7 @@ async function recordDraftDeliveryConfirmation(
   itemId: number,
   draftId: number,
   actor: string,
-  resumedFromStatus: 'approved' | 'send_failed' | null
+  resumedFromStatus: 'approved' | 'sending' | 'send_failed' | null
 ): Promise<void> {
   await withDbTransaction(db, async (txDb) => {
     await insertDraftSentHistoryIfMissing(txDb, itemId, draftId, actor, {
