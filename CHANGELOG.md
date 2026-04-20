@@ -9,7 +9,7 @@ All notable changes to GBrain will be documented in this file.
 
 This release absorbs upstream PR #210 into the fork and applies four post-integration fixes. The headline is Knowledge Runtime v0.13.0: a pluggable Resolver SDK, a transaction-safe BrainWriter with post-write validators, a three-bucket integrity repair pipeline, and a Budget ledger for enrichment cost tracking. On top of that, `put_page` now auto-extracts timeline entries — every page you write is immediately queryable, no second step required.
 
-The four post-integration fixes address stagger timing restoration, minion queue gating on schema v13, integrity auto-resume checkpoint durability, and hinted-candidate score threshold enforcement.
+Five post-integration fixes address stagger timing restoration, minion queue gating on schema v13, integrity auto-resume checkpoint durability, hinted-candidate score threshold enforcement, and a TOCTOU race in `integrity --auto` repair.
 
 ### The numbers that matter
 
@@ -71,6 +71,7 @@ What this means for agents and daily use: timeline queries work the moment you w
 - `fix(integrity,minions)` — restore auto-validation and apply stagger timing after absorb merge.
 - `fix(minions)` — gate minion queue on schema v13: prevents jobs from being claimed before the stagger columns exist.
 - `fix(integrity)` — make auto-resume checkpoints durable: progress survives process restart mid-scan.
+- `fix(integrity)` — eliminate TOCTOU in `repairBareTweet`: compiled_truth is now read inside the writer transaction via `WriteTx.getCompiledTruth()` so concurrent repair processes cannot silently overwrite each other's repairs.
 
 #### Tests
 - `test/resolvers.test.ts` — 622 lines, full Resolver SDK coverage (registry, builtins, confidence scoring, error paths)
