@@ -245,6 +245,19 @@ describe('shell handler: abort', () => {
     ));
     await expect(promise).rejects.toThrow(/aborted/);
   });
+  test('TERM-ignoring child receives SIGKILL after grace window', async () => {
+    const ac = new AbortController();
+    const started = Date.now();
+    const promise = shellHandler(makeCtx(
+      { cmd: `trap '' TERM; sleep 12`, cwd: '/tmp' },
+      { signal: ac.signal },
+    ));
+    setTimeout(() => ac.abort(new Error('cancel')), 100);
+    await expect(promise).rejects.toThrow(/aborted/);
+    const elapsedMs = Date.now() - started;
+    // With SIGKILL escalation the handler should not wait the full 12s sleep.
+    expect(elapsedMs).toBeLessThan(9000);
+  }, 15000);
 });
 
 // ---- shell-audit: ISO-week filename ----------------------------------------

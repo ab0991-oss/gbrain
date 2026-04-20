@@ -378,11 +378,17 @@ export class MinionWorker {
         errorText = err instanceof Error ? err.message : String(err);
       }
 
+      const abortReasonText = abort.signal.aborted
+        ? (abort.signal.reason instanceof Error
+          ? abort.signal.reason.message
+          : String(abort.signal.reason ?? ''))
+        : '';
+      const isTimeoutAbort = abort.signal.aborted && abortReasonText.trim().toLowerCase() === 'timeout';
       const isUnrecoverable = err instanceof UnrecoverableError;
       const attemptsExhausted = job.attempts_made + 1 >= job.max_attempts;
 
       let newStatus: 'delayed' | 'failed' | 'dead';
-      if (isUnrecoverable || attemptsExhausted) {
+      if (isTimeoutAbort || isUnrecoverable || attemptsExhausted) {
         newStatus = 'dead';
       } else {
         newStatus = 'delayed';

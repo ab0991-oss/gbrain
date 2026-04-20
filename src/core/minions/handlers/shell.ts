@@ -238,6 +238,8 @@ export async function shellHandler(ctx: MinionJobContext): Promise<ShellJobResul
   const pid = proc.pid ?? -1;
   const stdoutTail = new TailBuffer(STDOUT_TAIL_MAX_BYTES);
   const stderrTail = new TailBuffer(STDERR_TAIL_MAX_BYTES);
+  let exited = false;
+  proc.once('exit', () => { exited = true; });
 
   proc.stdout?.on('data', (c: Buffer) => stdoutTail.append(c));
   proc.stderr?.on('data', (c: Buffer) => stderrTail.append(c));
@@ -251,11 +253,11 @@ export async function shellHandler(ctx: MinionJobContext): Promise<ShellJobResul
   const onAbort = (label: string) => () => {
     if (killTimer !== null) return; // already started
     killReason = label;
-    if (!proc.killed) {
+    if (!exited) {
       try { proc.kill('SIGTERM'); } catch { /* proc already exited */ }
     }
     killTimer = setTimeout(() => {
-      if (!proc.killed) {
+      if (!exited) {
         try { proc.kill('SIGKILL'); } catch { /* already exited */ }
       }
     }, KILL_GRACE_MS);
