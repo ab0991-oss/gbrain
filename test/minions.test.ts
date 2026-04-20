@@ -6,6 +6,7 @@ import { MinionWorker } from '../src/core/minions/worker.ts';
 import { calculateBackoff } from '../src/core/minions/backoff.ts';
 import { UnrecoverableError } from '../src/core/minions/types.ts';
 import type { MinionJob } from '../src/core/minions/types.ts';
+import { LATEST_VERSION } from '../src/core/migrate.ts';
 
 let engine: PGLiteEngine;
 let queue: MinionQueue;
@@ -1547,5 +1548,27 @@ describe('MinionQueue: Attachments', () => {
     const list = await queue.listAttachments(job.id);
     expect(list.length).toBe(1);
     expect(list[0].filename).toBe('b.txt');
+  });
+});
+
+describe('MinionQueue: schema compatibility', () => {
+  test('rejects pre-v13 schema before insert and recovers after migration version is restored', async () => {
+    const previousVersion = await engine.getConfig('version') ?? String(LATEST_VERSION);
+
+    try {
+      await engine.setConfig('version', '12');
+      await expect(queue.add('sync', {}))
+        .rejects.toThrow('minion queue schema too old (schema version 12, need 13). Run \'gbrain init\' to apply migrations.');
+
+      const rows = await engine.executeRaw<{ count: string }>(
+        'SELECT count(*)::text as count FROM minion_jobs',
+      );
+      expect(parseInt(rows[0].count, 10)).toBe(0);
+    } finally {
+      await engine.setConfig('version', previousVersion);
+    }
+
+    const restored = await queue.add('sync', {});
+    expect(restored.status).toBe('waiting');
   });
 });

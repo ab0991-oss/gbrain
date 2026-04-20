@@ -170,15 +170,15 @@ describe('staggerMinuteOffset', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Schema migration v12 applies
+// Schema migration v13 applies
 // ---------------------------------------------------------------------------
 
-describe('schema migration v12 — minion_quiet_hours_stagger', () => {
+describe('schema migration v13 — minion_quiet_hours_stagger', () => {
   let engine: BrainEngine;
   let dbDir: string;
 
   beforeAll(async () => {
-    dbDir = mkdtempSync(join(tmpdir(), 'm12-'));
+    dbDir = mkdtempSync(join(tmpdir(), 'm13-'));
     engine = new PGLiteEngine();
     await engine.connect({ engine: 'pglite', database_path: dbDir });
     await engine.initSchema();

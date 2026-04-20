@@ -16,7 +16,7 @@ import type {
 import { rowToMinionJob, rowToInboxMessage, rowToAttachment } from './types.ts';
 import { validateAttachment } from './attachments.ts';
 
-const MIGRATION_VERSION = 7;
+const MIGRATION_VERSION = 13;
 
 const DEFAULT_MAX_SPAWN_DEPTH = 5;
 const DEFAULT_MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024; // 5 MiB
@@ -32,13 +32,13 @@ export class MinionQueue {
     this.maxAttachmentBytes = opts.maxAttachmentBytes ?? DEFAULT_MAX_ATTACHMENT_BYTES;
   }
 
-  /** Verify minion_jobs table exists (migration v5+). Call before first operation. */
+  /** Verify queue schema supports quiet-hours/stagger fields (migration v13+). */
   async ensureSchema(): Promise<void> {
     const ver = await this.engine.getConfig('version');
     const current = parseInt(ver || '1', 10);
     if (current < MIGRATION_VERSION) {
       throw new Error(
-        `minion_jobs table not found (schema version ${current}, need ${MIGRATION_VERSION}). Run 'gbrain init' to apply migrations.`
+        `minion queue schema too old (schema version ${current}, need ${MIGRATION_VERSION}). Run 'gbrain init' to apply migrations.`
       );
     }
   }
@@ -109,7 +109,7 @@ export class MinionQueue {
 
       // 3. Insert child. Use ON CONFLICT for idempotency; if a concurrent submit
       //    raced past the fast-path SELECT, the unique index catches it here.
-      //    v12 adds quiet_hours + stagger_key passed through from opts.
+      //    v13 adds quiet_hours + stagger_key passed through from opts.
       const insertSql = opts?.idempotency_key
         ? `INSERT INTO minion_jobs (name, queue, status, priority, data, max_attempts, backoff_type,
             backoff_delay, backoff_jitter, delay_until, parent_job_id, on_child_fail,
