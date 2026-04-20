@@ -959,10 +959,10 @@ describe('MinionWorker: v7 Behavior', () => {
     expect(abortFired).toBe(false);
   });
 
-  test('setTimeout safety net fires abort when handler stalls', async () => {
+  test('timeout abort is terminal (no retry) even when max_attempts > 1', async () => {
     const job = await queue.add('slow', {}, {
       timeout_ms: 100,
-      max_attempts: 1,
+      max_attempts: 3,
     });
 
     let abortFired = false;
@@ -975,8 +975,7 @@ describe('MinionWorker: v7 Behavior', () => {
       ctx.signal.addEventListener('abort', () => { abortFired = true; });
       // Stall longer than timeout_ms
       await new Promise(r => setTimeout(r, 800));
-      // After abort fires, throwing here goes through the catch — but
-      // catch sees signal.aborted and skips failJob.
+      // Handler keeps running briefly after abort, then throws.
       throw new Error('should-be-aborted');
     });
 
@@ -986,6 +985,10 @@ describe('MinionWorker: v7 Behavior', () => {
     await p;
 
     expect(abortFired).toBe(true);
+    const final = await queue.getJob(job.id);
+    expect(final!.status).toBe('dead');
+    expect(final!.attempts_made).toBe(1);
+    expect(final!.error_text).toContain('aborted: timeout');
   });
 });
 

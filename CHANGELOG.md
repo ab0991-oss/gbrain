@@ -4,38 +4,69 @@ All notable changes to GBrain will be documented in this file.
 
 ## [0.15.1] - 2026-04-21
 
-**Action Brain failure-mode hardening: stale context detection, degraded fetch protection, and concurrent retry correctness.**
+**Shell jobs ship + Action Brain failure-mode hardening. Two correctness fixes in one patch.**
 
-Two targeted fixes (GIT-1063) address the failure paths that matter most when `wacli` is unreliable or a conversation thread changes between draft generation and approval.
+This release absorbs upstream PR #217 into the fork and applies two targeted Action Brain fixes (GIT-1063). The Minions `shell` job type lets you run deterministic cron scripts as background jobs without consuming an Opus session. Two independent security gates guard shell execution: the CLI opt-in flag and a per-worker `GBRAIN_ALLOW_SHELL_JOBS=1` env requirement. A co-shipped worker fix corrects a long-standing abort-path bug where timed-out jobs were left in `active` instead of moved to `dead`.
 
-When the thread fetch returns `success=false`, the system previously swallowed it silently and treated the empty result as fresh context. Now it throws, which propagates `context_fetch_degraded = true`. The stale context sweep correctly skips drafts instead of superseding them based on a broken diff. The `action_draft_regenerate` path skips regeneration and logs a `draft_skipped` event. Both paths preserve the existing pending draft rather than clobbering it.
-
-The legacy hash compatibility bridge (`doesContextHashMatch`) handles drafts generated before `context_fetch_degraded` was added to the hash input, so existing brains upgrade without false supersedes.
+On the Action Brain side: when `wacli messages list` returns `success=false`, the system previously swallowed it silently and treated the empty result as fresh context. Now it throws, which propagates `context_fetch_degraded = true`. The stale context sweep correctly skips drafts instead of superseding them based on a broken diff. A legacy hash compatibility bridge handles drafts generated before `context_fetch_degraded` was added to the hash input, so existing brains upgrade without false supersedes.
 
 ### The numbers that matter
 
-Source: `bun test` on merged branch (`aa605ae` + `2367c29` atop v0.15.0).
+Source: `bun test` on merged branch against PGLite in-process.
 
-| Metric | Before | After | Δ |
-|--------|--------|-------|---|
-| Tests | 1521 | 1755 | +234 |
-| Failure-mode paths covered | partial | 12/12 | complete |
-| Pass rate | 100% | 100% | — |
+| Metric | Before | After | Delta |
+|--------|--------|-------|-------|
+| Shell handler unit tests | 0 | 34 | +34 |
+| Abort scenarios covered | 0 | 4 | +4 |
+| Timeout-abort routing | `delayed` (retry) | `dead` (terminal) | Correctness fix |
+| Action Brain failure-mode paths covered | partial | 12/12 | complete |
 | `wacli success=false` behavior | silently empty | throws + degraded | correct |
 | Stale sweep on degraded fetch | supersedes | preserves | correct |
 
-234 new tests, all green. Zero regressions.
+Timeout-abort → `dead` matters: a job that exceeded its wall-clock budget should not keep retrying. The prior `delayed` routing meant a badly-behaved script could loop until `max_attempts` ran out. For Action Brain users with flaky WhatsApp thread fetches, pending drafts are now safe — a transient `wacli` failure no longer silently supersedes a good draft.
 
-### What this means for Action Brain users
+### What this means for operators and Action Brain users
 
-If your WhatsApp thread fetch is flaky — which it is in Tanzania — your pending drafts are now safe. A transient `wacli` failure no longer clears your context hash comparison and silently supersedes a good draft. The brief still surfaces the draft; the next sweep will retry.
+Shell cron scripts: set `GBRAIN_ALLOW_SHELL_JOBS=1` on the worker and submit with `gbrain jobs submit shell --params '{"cmd":"...","cwd":"/abs/path"}'`. Jobs without the worker flag sit in `waiting` with a starvation warning. The audit log at `~/.gbrain/audit/shell-jobs-YYYY-Www.jsonl` tracks every submission.
 
-Run `gbrain upgrade` to get the fix.
+Action Brain: the brief still surfaces any pending draft when context fetch is degraded; the next sweep will retry. Run `gbrain upgrade` to get both fixes.
+
+## To take advantage of v0.15.1
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Enable shell jobs on your worker (opt-in, default-off):**
+   ```bash
+   GBRAIN_ALLOW_SHELL_JOBS=1 gbrain jobs work
+   ```
+3. **Verify the outcome:**
+   ```bash
+   gbrain jobs submit shell --params '{"cmd":"echo ok","cwd":"/tmp"}' --follow
+   gbrain stats
+   ```
+4. **If any step fails,** file an issue with `gbrain doctor` output and `~/.gbrain/upgrade-errors.jsonl`.
 
 ### Itemized changes
 
-#### Action Brain
+#### Shell job handler (new)
+- `src/core/minions/handlers/shell.ts` — `shell` Minion handler. Runs `cmd` via `/bin/sh -c` (absolute path, PATH-poisoning-safe) or `argv` directly. Env allowlist (`PATH`, `HOME`, `USER`, `LANG`, `TZ`, `NODE_ENV`) prevents accidental secret leakage; callers add extra keys via `env:`. UTF-8-safe `TailBuffer` caps stdout at 64KB / stderr at 16KB with truncation markers.
+- `src/core/minions/handlers/shell-audit.ts` — JSONL submission audit log at `~/.gbrain/audit/shell-jobs-YYYY-Www.jsonl` (ISO week rotation, `GBRAIN_AUDIT_DIR` override). Best-effort: write failures go to stderr and never block submission. Never logs `env` values.
+- `src/core/minions/protected-names.ts` — side-effect-free constant module: `PROTECTED_JOB_NAMES = Set(['shell'])`. Imported by both queue and CLI path; must stay pure.
 
+#### Worker abort path fix
+- `src/core/minions/worker.ts` — `ctx.shutdownSignal` (fires only on SIGTERM/SIGINT, separate from per-job `signal`). Abort reason is now an `Error` object. Timed-out jobs now route to `dead` instead of `delayed` — timeout aborts are terminal.
+- `src/core/minions/types.ts` — `MinionJobContext.shutdownSignal` field added.
+
+#### Queue guard
+- `src/core/minions/queue.ts` — `MinionQueue.add()` gains a 4th `trusted` arg (`{allowProtectedSubmit: true}`). Protected names are rejected unless the flag is set explicitly. Whitespace bypass closed.
+- `src/core/operations.ts` — `submit_job` rejects protected names from MCP callers (`ctx.remote === true`). `timeout_ms` field added.
+- `src/commands/jobs.ts` — `--timeout-ms` flag added to CLI submit. Shell submissions emit starvation warning when worker env flag may not be set.
+
+#### Action Brain failure-mode hardening (GIT-1063)
 - `fix(action-brain)`: `wacli messages list` returning `success=false` now throws instead of returning an empty array, correctly propagating `context_fetch_degraded = true`
 - `fix(action-brain)`: Stale context sweep skips supersede when `context_fetch_degraded` — fail closed, preserves pending draft
 - `fix(action-brain)`: `action_draft_regenerate` skips with `draft_skipped` event when context fetch is degraded, no new draft inserted
@@ -43,8 +74,15 @@ Run `gbrain upgrade` to get the fix.
 - `fix(action-brain)`: `action_draft_regenerate` logs `draft_skipped` when recipient unavailable instead of throwing
 
 #### Tests
+- `test/minions-shell.test.ts` — 355-line unit test file: protected-name guard, queue trusted-arg, handler validation, spawn + output, env allowlist, abort (signal + shutdown + pre-abort), SIGKILL escalation, ISO-week audit filename, audit write path, output truncation.
+- `test/e2e/minions-shell.test.ts` — E2E tests against real Postgres (skipped gracefully without `DATABASE_URL`).
+- `test/minions.test.ts` — regression guards updated for abort reason extraction.
+- 12 new Action Brain failure-mode test cases: stale context supersede, hash-unchanged preservation, legacy hash compat, transient degraded skip, `wacli success=false`, cap enforcement, starvation prevention, generation_failed logging, skipped on no_recipient, skipped on degraded context.
 
-- 12 new failure-mode test cases covering: stale context supersede, hash-unchanged preservation, legacy hash compat, transient degraded skip, `wacli success=false`, cap enforcement, starvation prevention under sustained ingest, generation_failed logging, skipped on no_recipient, skipped on degraded context
+#### Docs
+- `docs/guides/minions-shell-jobs.md` — operator guide: security model, env allowlist, audit log, error reference, cron recipe.
+- `docs/UPGRADING_DOWNSTREAM_AGENTS.md` — v0.15.1 upgrade notes for agent forks.
+- `skills/migrations/v0.14.0.md` — migration orchestrator for downstream agents.
 
 ## [0.15.0] - 2026-04-21
 
