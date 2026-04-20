@@ -2,6 +2,50 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.14.0] - 2026-04-20
+
+**Action Brain 0.2 draft approvals: context-aware message drafts with explicit approve-before-send.**
+
+Action Brain now generates suggested WhatsApp response drafts for your outstanding commitments and follow-ups. Each draft is built from bounded GBrain context sourced at generation time, runs through a trust-boundary sanitizer that strips XML scaffold tags and owner-name injections, and is stored in a new `action_drafts` table. Nothing sends automatically — you call `gbrain action draft approve <id>` to authorize the outbound. The morning brief now shows pending drafts inline alongside each action item so you see what needs attention in one view. A 15-case deterministic CI gate runs on every `bun test` and enforces structural pass rate >= 0.90 so regressions in draft quality are caught before they ship.
+
+**The numbers that matter**
+
+All measurements against the 15-case checked-in fixture (`test/action-brain/fixtures/draft-gold-set.jsonl`) on the CI gate run:
+
+| Metric | Before | After | Delta |
+|--------|--------|-------|-------|
+| Structural pass rate | — | 100% (15/15) | baseline |
+| Max chars enforced | — | ✓ (per-case, 320 cap) | baseline |
+| Prompt tag echo | — | 0 violations | baseline |
+| context_hash stable | — | ✓ (identical input) | baseline |
+| Test suite | 1412 pass | 1483 pass | +71 tests |
+
+The gate runs in the unit lane (no database required). Private 50+ corpus stays out of repo via `ACTION_BRAIN_PRIVATE_DRAFT_GOLD_SET_PATH`.
+
+**What this means for Action Brain operators:** Your agent now proposes a specific message for every open action item. You review the brief, approve what's right, reject or edit what isn't. No draft leaves without your explicit sign-off. The context sourcing is bounded (8 GBrain pages max, 300-char excerpts) so drafts stay grounded rather than hallucinating from stale memory.
+
+### Itemized changes
+
+#### Action Brain 0.2 — Draft approvals
+
+- `src/action-brain/action-schema.ts` — new `action_drafts` table (versioned, status FSM: pending → approved/rejected/sent/send_failed/superseded, UNIQUE on `action_item_id + version`). Idempotent init.
+- `src/action-brain/context.ts` — new `buildActionDraftContext`: resolves source contact, queries GBrain pages via `searchKeyword` + `getPage`, clips to `max_pages=8` and `excerpt_chars=300`, hashes context for stability tracking.
+- `src/action-brain/draft-generator.ts` — production draft generator: `generateActionDraft` (LLM call with XML-delimited scaffold, owner sanitizer, prompt-tag-echo guard, max-chars clamp), `buildDraftContextSummary`, `DraftGenerationContext` type. Trust boundary enforced: owner/waiting_on fields sanitized before prompt interpolation.
+- `src/action-brain/sanitize.ts` — owner-name sanitizer: strips control chars U+0000–U+001F, XML-significant chars, enforces 100-char cap. Used by draft generator to prevent prompt injection via owner fields.
+- `src/action-brain/brief.ts` — `action_brief` now fetches pending/approved drafts for each item and renders them inline with status labels. Send failures surfaced in brief output.
+- `src/action-brain/operations.ts` — new `action_draft_list`, `action_draft_show`, `action_draft_approve`, `action_draft_reject`, `action_draft_edit`, `action_draft_regenerate` operations. Trust boundary: `action_draft_approve` enforces `remote: false` (CLI only, not MCP).
+
+#### CI gate — Draft quality
+
+- `test/action-brain/draft-gold-set.test.ts` — deterministic draft-quality CI gate: `DeterministicDraftGoldSetClient` mirrors GIT-175 pattern. Six structural assertions per case: length ≤ max_chars, must_include_any hit, must_not_include_any clean, no prompt-tag echo, not empty, not title echo. Gate enforces `structural_pass_rate >= 0.90`. Two additional tests: context_hash stability (identical input → same hash) and mutation detection (different input → different hash). (GIT-1064)
+- `test/action-brain/fixtures/draft-gold-set.jsonl` — 15 synthetic cases, no PII. Covers all five ActionType values (commitment, follow_up, decision, question, delegation). `deterministic_draft` field drives the fake client.
+- `test/action-brain/fixtures/README.md` — documents fixture schema, env var contracts, and private corpus pattern.
+
+#### Docs
+
+- `docs/action-brain/0.2-qa-runbook.md` — 48h QA runbook for post-ship verification: WhatsApp ingest → extraction → draft generation → brief display → approve/reject flows. Includes approval-send correlation window (30s).
+- `docs/designs/action-brain/0.2.md` — full design doc for MVP 0.2 (confirm-before-send).
+
 ## [0.13.6] - 2026-04-20
 
 ### Added
