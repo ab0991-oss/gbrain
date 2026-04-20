@@ -371,40 +371,27 @@ export class PGLiteEngine implements BrainEngine {
     return result.rows.length;
   }
 
-  async removeLink(from: string, to: string, linkType?: string, linkSource?: string): Promise<void> {
-    if (linkType !== undefined && linkSource !== undefined) {
-      await this.db.query(
-        `DELETE FROM links
-         WHERE from_page_id = (SELECT id FROM pages WHERE slug = $1)
-           AND to_page_id = (SELECT id FROM pages WHERE slug = $2)
-           AND link_type = $3
-           AND link_source IS NOT DISTINCT FROM $4`,
-        [from, to, linkType, linkSource]
-      );
-    } else if (linkType !== undefined) {
-      await this.db.query(
-        `DELETE FROM links
-         WHERE from_page_id = (SELECT id FROM pages WHERE slug = $1)
-           AND to_page_id = (SELECT id FROM pages WHERE slug = $2)
-           AND link_type = $3`,
-        [from, to, linkType]
-      );
-    } else if (linkSource !== undefined) {
-      await this.db.query(
-        `DELETE FROM links
-         WHERE from_page_id = (SELECT id FROM pages WHERE slug = $1)
-           AND to_page_id = (SELECT id FROM pages WHERE slug = $2)
-           AND link_source IS NOT DISTINCT FROM $3`,
-        [from, to, linkSource]
-      );
-    } else {
-      await this.db.query(
-        `DELETE FROM links
-         WHERE from_page_id = (SELECT id FROM pages WHERE slug = $1)
-           AND to_page_id = (SELECT id FROM pages WHERE slug = $2)`,
-        [from, to]
-      );
+  async removeLink(from: string, to: string, linkType?: string, linkSource?: string, originSlug?: string): Promise<void> {
+    const params: unknown[] = [from, to];
+    let where = `from_page_id = (SELECT id FROM pages WHERE slug = $1)
+           AND to_page_id = (SELECT id FROM pages WHERE slug = $2)`;
+    if (linkType !== undefined) {
+      params.push(linkType);
+      where += ` AND link_type = $${params.length}`;
     }
+    if (linkSource !== undefined) {
+      params.push(linkSource);
+      where += ` AND link_source IS NOT DISTINCT FROM $${params.length}`;
+    }
+    if (originSlug !== undefined) {
+      params.push(originSlug);
+      where += ` AND origin_page_id = (SELECT id FROM pages WHERE slug = $${params.length})`;
+    }
+    await this.db.query(
+      `DELETE FROM links
+       WHERE ${where}`,
+      params,
+    );
   }
 
   async getLinks(slug: string): Promise<Link[]> {

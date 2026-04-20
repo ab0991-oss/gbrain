@@ -107,9 +107,10 @@ export interface BrainEngine {
    * are removed (matches pre-multi-type-link behavior). linkSource additionally
    * constrains the delete to a specific provenance ('frontmatter', 'markdown',
    * 'manual') — used by runAutoLink reconciliation to avoid deleting edges from
-   * other provenances when pruning frontmatter-derived edges.
+   * other provenances when pruning frontmatter-derived edges. originSlug (when
+   * provided) constrains the delete to edges authored by that frontmatter page.
    */
-  removeLink(from: string, to: string, linkType?: string, linkSource?: string): Promise<void>;
+  removeLink(from: string, to: string, linkType?: string, linkSource?: string, originSlug?: string): Promise<void>;
   getLinks(slug: string): Promise<Link[]>;
   getBacklinks(slug: string): Promise<Link[]>;
   /**

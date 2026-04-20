@@ -385,7 +385,8 @@ async function runAutoLink(
       const key = `${l.to_slug}\u0000${l.link_type}\u0000${l.link_source ?? 'markdown'}`;
       if (!outKeys.has(key)) {
         try {
-          await tx.removeLink(slug, l.to_slug, l.link_type, l.link_source ?? undefined);
+          const originSlug = l.link_source === 'frontmatter' ? (l.origin_slug ?? slug) : undefined;
+          await tx.removeLink(slug, l.to_slug, l.link_type, l.link_source ?? undefined, originSlug);
           removed++;
         } catch {
           errors++;
@@ -398,7 +399,7 @@ async function runAutoLink(
       const key = `${l.from_slug}\u0000${l.link_type}`;
       if (!incKeys.has(key)) {
         try {
-          await tx.removeLink(l.from_slug, slug, l.link_type, 'frontmatter');
+          await tx.removeLink(l.from_slug, slug, l.link_type, 'frontmatter', slug);
           removed++;
         } catch {
           errors++;

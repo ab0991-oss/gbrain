@@ -426,39 +426,21 @@ export class PostgresEngine implements BrainEngine {
     return result.length;
   }
 
-  async removeLink(from: string, to: string, linkType?: string, linkSource?: string): Promise<void> {
+  async removeLink(from: string, to: string, linkType?: string, linkSource?: string, originSlug?: string): Promise<void> {
     const sql = this.sql;
-    // Build up filters dynamically. linkType + linkSource are independent
-    // optional constraints; all four combinations are valid.
-    if (linkType !== undefined && linkSource !== undefined) {
-      await sql`
-        DELETE FROM links
-        WHERE from_page_id = (SELECT id FROM pages WHERE slug = ${from})
-          AND to_page_id = (SELECT id FROM pages WHERE slug = ${to})
-          AND link_type = ${linkType}
-          AND link_source IS NOT DISTINCT FROM ${linkSource}
-      `;
-    } else if (linkType !== undefined) {
-      await sql`
-        DELETE FROM links
-        WHERE from_page_id = (SELECT id FROM pages WHERE slug = ${from})
-          AND to_page_id = (SELECT id FROM pages WHERE slug = ${to})
-          AND link_type = ${linkType}
-      `;
-    } else if (linkSource !== undefined) {
-      await sql`
-        DELETE FROM links
-        WHERE from_page_id = (SELECT id FROM pages WHERE slug = ${from})
-          AND to_page_id = (SELECT id FROM pages WHERE slug = ${to})
-          AND link_source IS NOT DISTINCT FROM ${linkSource}
-      `;
-    } else {
-      await sql`
-        DELETE FROM links
-        WHERE from_page_id = (SELECT id FROM pages WHERE slug = ${from})
-          AND to_page_id = (SELECT id FROM pages WHERE slug = ${to})
-      `;
-    }
+    const linkTypeClause = linkType !== undefined ? sql`AND link_type = ${linkType}` : sql``;
+    const linkSourceClause = linkSource !== undefined ? sql`AND link_source IS NOT DISTINCT FROM ${linkSource}` : sql``;
+    const originClause = originSlug !== undefined
+      ? sql`AND origin_page_id = (SELECT id FROM pages WHERE slug = ${originSlug})`
+      : sql``;
+    await sql`
+      DELETE FROM links
+      WHERE from_page_id = (SELECT id FROM pages WHERE slug = ${from})
+        AND to_page_id = (SELECT id FROM pages WHERE slug = ${to})
+        ${linkTypeClause}
+        ${linkSourceClause}
+        ${originClause}
+    `;
   }
 
   async getLinks(slug: string): Promise<Link[]> {
