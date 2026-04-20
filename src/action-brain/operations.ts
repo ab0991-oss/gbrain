@@ -327,6 +327,10 @@ export const actionBrainOperations: Operation[] = [
       id: { type: 'number', required: true, description: 'Draft id' },
       actor: { type: 'string', description: 'Actor writing lifecycle events' },
       timeout_ms: { type: 'number', description: 'wacli send timeout in milliseconds (default: 30000)' },
+      retry: {
+        type: 'boolean',
+        description: 'When true, resume interrupted approved drafts and retry send_failed drafts',
+      },
     },
     mutating: true,
     cliHints: { name: 'action-draft-approve', positional: ['id'] },
@@ -335,12 +339,13 @@ export const actionBrainOperations: Operation[] = [
       const id = asRequiredInteger(p.id, 'id');
       const actor = asOptionalNonEmptyString(p.actor) ?? 'human_feedback';
       const timeoutMs = asOptionalInteger(p.timeout_ms, 'timeout_ms') ?? ACTION_DRAFT_DEFAULT_SEND_TIMEOUT_MS;
+      const retry = parseOptionalBoolean(p.retry) ?? false;
       if (timeoutMs <= 0) {
         throw new Error('Invalid timeout_ms: expected integer > 0');
       }
 
       if (ctx.dryRun) {
-        return { dry_run: true, action: 'action_draft_approve', id, timeout_ms: timeoutMs };
+        return { dry_run: true, action: 'action_draft_approve', id, timeout_ms: timeoutMs, retry };
       }
 
       const claimed = await withDbTransaction(db, async (txDb) => {
@@ -349,9 +354,36 @@ export const actionBrainOperations: Operation[] = [
           throw new Error(`Action draft not found: ${id}`);
         }
 
+        if (current.status === 'approved' && current.sent_at === null && retry) {
+          return {
+            claimed: true as const,
+            resumedFromStatus: 'approved' as const,
+            draft: current,
+          };
+        }
+
+        if (current.status === 'send_failed' && retry) {
+          const retried = await reopenFailedDraftForRetry(txDb, id);
+          if (!retried) {
+            const latest = await getActionDraftStateForUpdate(txDb, id);
+            return {
+              claimed: false as const,
+              resumedFromStatus: null,
+              draft: latest ?? current,
+            };
+          }
+
+          return {
+            claimed: true as const,
+            resumedFromStatus: 'send_failed' as const,
+            draft: retried,
+          };
+        }
+
         if (current.status !== 'pending') {
           return {
             claimed: false as const,
+            resumedFromStatus: null,
             draft: current,
           };
         }
@@ -361,6 +393,7 @@ export const actionBrainOperations: Operation[] = [
           const latest = await getActionDraftStateForUpdate(txDb, id);
           return {
             claimed: false as const,
+            resumedFromStatus: null,
             draft: latest ?? current,
           };
         }
@@ -373,21 +406,26 @@ export const actionBrainOperations: Operation[] = [
 
         return {
           claimed: true as const,
+          resumedFromStatus: null,
           draft: approved,
         };
       });
 
       if (!claimed.claimed) {
+        const retryRequired = claimed.draft.status === 'approved' || claimed.draft.status === 'send_failed';
         return {
           status: 'already_processed',
           draft_id: claimed.draft.id,
           draft_status: claimed.draft.status,
           approved_at: toOptionalDate(claimed.draft.approved_at),
           sent_at: toOptionalDate(claimed.draft.sent_at),
+          retry_required: retryRequired,
+          retry_hint: retryRequired ? 'rerun with retry=true to resume delivery' : undefined,
         };
       }
 
       const approvedDraft = claimed.draft;
+      const resumedFromStatus = claimed.resumedFromStatus;
       try {
         await sendDraftViaWacli(approvedDraft.recipient, approvedDraft.draft_text, timeoutMs);
       } catch (error) {
@@ -400,6 +438,7 @@ export const actionBrainOperations: Operation[] = [
           await insertActionHistory(txDb, updated.action_item_id, 'draft_send_failed', actor, {
             draft_id: updated.id,
             error: sendError,
+            resumed_from_status: resumedFromStatus,
           });
           return updated;
         });
@@ -407,6 +446,7 @@ export const actionBrainOperations: Operation[] = [
         return {
           status: 'send_failed',
           draft: mapActionDraftRecord(failedDraft),
+          resumed_from_status: resumedFromStatus,
         };
       }
 
@@ -419,6 +459,7 @@ export const actionBrainOperations: Operation[] = [
         await transitionParentActionItemAfterSend(txDb, updated.action_item_id);
         await insertActionHistory(txDb, updated.action_item_id, 'draft_sent', actor, {
           draft_id: updated.id,
+          resumed_from_status: resumedFromStatus,
         });
         return updated;
       });
@@ -426,6 +467,7 @@ export const actionBrainOperations: Operation[] = [
       return {
         status: 'sent',
         draft: mapActionDraftRecord(sentDraft),
+        resumed_from_status: resumedFromStatus,
       };
     },
   },
@@ -1217,6 +1259,20 @@ async function markDraftApproved(db: QueryableDb, draftId: number): Promise<Acti
          send_error = NULL
      WHERE id = $1
        AND status = 'pending'
+     RETURNING id, action_item_id, status, channel, recipient, draft_text, approved_at, sent_at`,
+    [draftId]
+  );
+  return result.rows[0] ?? null;
+}
+
+async function reopenFailedDraftForRetry(db: QueryableDb, draftId: number): Promise<ActionDraftStateRow | null> {
+  const result = await db.query<ActionDraftStateRow>(
+    `UPDATE action_drafts
+     SET status = 'approved',
+         send_error = NULL,
+         approved_at = COALESCE(approved_at, now())
+     WHERE id = $1
+       AND status = 'send_failed'
      RETURNING id, action_item_id, status, channel, recipient, draft_text, approved_at, sent_at`,
     [draftId]
   );
