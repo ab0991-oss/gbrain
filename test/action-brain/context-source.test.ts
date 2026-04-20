@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import {
   ACTION_DRAFT_CONTEXT_MAX_CHARS,
@@ -22,6 +25,31 @@ function createEngine(overrides: {
     searchKeyword: async (query: string) => searchKeyword(query),
     getPage: async (slug: string) => (await getPage(slug)) as any,
   } as BrainEngine;
+}
+
+async function withMockWacliPayload(payload: unknown, fn: () => Promise<void>): Promise<void> {
+  const binDir = mkdtempSync(join(tmpdir(), 'gbrain-context-source-wacli-'));
+  const scriptPath = join(binDir, 'wacli');
+  const script = `#!/bin/sh
+cat <<'JSON'
+${JSON.stringify(payload)}
+JSON
+`;
+  writeFileSync(scriptPath, script);
+  chmodSync(scriptPath, 0o755);
+
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${originalPath ?? ''}`;
+  try {
+    await fn();
+  } finally {
+    if (originalPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = originalPath;
+    }
+    rmSync(binDir, { recursive: true, force: true });
+  }
 }
 
 describe('buildActionDraftContextSource', () => {
@@ -146,6 +174,46 @@ describe('buildActionDraftContextSource', () => {
     expect(context.context_fetch_degraded).toBe(true);
     expect(context.thread).toEqual([]);
     expect(context.gbrain_page_slugs).toEqual(['people/alice']);
+  });
+
+  test('marks context as degraded when wacli thread fetch returns success=false payload', async () => {
+    const engine = createEngine();
+
+    await withMockWacliPayload(
+      {
+        success: false,
+        data: { messages: [] },
+      },
+      async () => {
+        const context = await buildActionDraftContextSource(engine, {
+          source_contact: '',
+          source_thread: 'ops-thread',
+        });
+
+        expect(context.context_fetch_degraded).toBe(true);
+        expect(context.thread).toEqual([]);
+      }
+    );
+  });
+
+  test('keeps context non-degraded when wacli returns success=true with empty thread', async () => {
+    const engine = createEngine();
+
+    await withMockWacliPayload(
+      {
+        success: true,
+        data: { messages: [] },
+      },
+      async () => {
+        const context = await buildActionDraftContextSource(engine, {
+          source_contact: '',
+          source_thread: 'ops-thread',
+        });
+
+        expect(context.context_fetch_degraded).toBe(false);
+        expect(context.thread).toEqual([]);
+      }
+    );
   });
 
   test('context_hash is stable across identical inputs', async () => {

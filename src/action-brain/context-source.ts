@@ -213,8 +213,11 @@ async function runWacliThreadMessages(request: {
     data?: { messages?: Array<Record<string, unknown>> };
   };
 
-  if (!payload.success || !Array.isArray(payload.data?.messages)) {
-    return [];
+  if (payload.success !== true) {
+    throw new Error('wacli messages list returned success=false');
+  }
+  if (!Array.isArray(payload.data?.messages)) {
+    throw new Error('wacli messages list returned invalid payload');
   }
 
   return payload.data.messages.map((message) => ({

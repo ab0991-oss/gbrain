@@ -1,4 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { mergeOperationSets, operations } from '../../src/core/operations.ts';
 import type { Operation, OperationContext } from '../../src/core/operations.ts';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
@@ -112,6 +115,31 @@ async function seedActionItemAndDraft(
   const draftId = Number((draft.rows[0] as { id: number | string }).id);
 
   return { itemId, draftId };
+}
+
+async function withMockWacliPayload(payload: unknown, fn: () => Promise<void>): Promise<void> {
+  const binDir = mkdtempSync(join(tmpdir(), 'gbrain-ops-wacli-'));
+  const scriptPath = join(binDir, 'wacli');
+  const script = `#!/bin/sh
+cat <<'JSON'
+${JSON.stringify(payload)}
+JSON
+`;
+  writeFileSync(scriptPath, script);
+  chmodSync(scriptPath, 0o755);
+
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${originalPath ?? ''}`;
+  try {
+    await fn();
+  } finally {
+    if (originalPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = originalPath;
+    }
+    rmSync(binDir, { recursive: true, force: true });
+  }
 }
 
 describe('Action Brain operation integration', () => {
@@ -983,6 +1011,46 @@ describe('Action Brain operation integration', () => {
       } finally {
         (engine as any).searchKeyword = originalSearchKeyword;
       }
+
+      const draftRow = await db.query(
+        `SELECT status
+         FROM action_drafts
+         WHERE id = $1`,
+        [draftId]
+      );
+      expect(draftRow.rows[0]?.status).toBe('pending');
+
+      const history = await db.query(
+        `SELECT count(*)::int AS n
+         FROM action_history
+         WHERE item_id = $1
+           AND event_type = 'draft_superseded'`,
+        [itemId]
+      );
+      expect(Number((history.rows[0] as { n: number | string }).n)).toBe(0);
+    });
+  });
+
+  test('action_brief keeps pending drafts when thread fetch returns success=false payload', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const db = (engine as unknown as EngineWithDb).db;
+      const actionBrief = getActionOperation('action_brief');
+      const { draftId, itemId } = await seedActionItemAndDraft(engine, {
+        sourceContact: '',
+        sourceThread: 'ops-thread',
+        contextHash: 'stale-context-hash',
+      });
+
+      await withMockWacliPayload(
+        {
+          success: false,
+          data: { messages: [] },
+        },
+        async () => {
+          const result = await actionBrief.handler(ctx, {});
+          expect(typeof result.brief).toBe('string');
+        }
+      );
 
       const draftRow = await db.query(
         `SELECT status
