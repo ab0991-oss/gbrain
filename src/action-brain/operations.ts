@@ -52,6 +52,7 @@ export const ACTION_BRIEF_SOURCE_CONTACT_LOOKUP_CAP = 24;
 export const ACTION_BRIEF_STALE_CONTEXT_SWEEP_CONCURRENCY = 4;
 export const ACTION_BRIEF_STALE_CONTEXT_SWEEP_CAP = 24;
 const ACTION_BRIEF_STALE_CONTEXT_THREAD_FETCH_TIMEOUT_MS = ACTION_DRAFT_CONTEXT_THREAD_FETCH_TIMEOUT_MS;
+const ACTION_BRIEF_STALE_CONTEXT_SWEEP_CURSOR_KEY = 'stale_context_sweep_cursor_draft_id';
 const execFileAsync = promisify(execFile);
 const initializedEngines = new WeakSet<object>();
 const postgresDbCache = new WeakMap<object, QueryableDb>();
@@ -150,6 +151,10 @@ interface PendingDraftContextCheckRow {
   context_hash: string;
   source_contact: string;
   source_thread: string;
+}
+
+interface ActionRuntimeStateRow {
+  value_text: string;
 }
 
 interface SendCommandResult {
@@ -1823,24 +1828,10 @@ async function supersedePendingDraftsWithStaleContext(
   engine: BrainEngine,
   actor: string
 ): Promise<void> {
-  const result = await db.query<PendingDraftContextCheckRow>(
-    `SELECT
-       d.id AS draft_id,
-       d.action_item_id,
-       d.context_hash,
-       ai.source_contact,
-       ai.source_thread
-     FROM action_drafts d
-     INNER JOIN action_items ai ON ai.id = d.action_item_id
-     WHERE d.status = 'pending'
-       AND ai.status NOT IN ('resolved', 'dropped')
-     ORDER BY d.id ASC
-     LIMIT $1`,
-    [ACTION_BRIEF_STALE_CONTEXT_SWEEP_CAP]
-  );
+  const rows = await leasePendingDraftsForStaleContextSweep(db);
 
-  for (let offset = 0; offset < result.rows.length; offset += ACTION_BRIEF_STALE_CONTEXT_SWEEP_CONCURRENCY) {
-    const batch = result.rows.slice(offset, offset + ACTION_BRIEF_STALE_CONTEXT_SWEEP_CONCURRENCY);
+  for (let offset = 0; offset < rows.length; offset += ACTION_BRIEF_STALE_CONTEXT_SWEEP_CONCURRENCY) {
+    const batch = rows.slice(offset, offset + ACTION_BRIEF_STALE_CONTEXT_SWEEP_CONCURRENCY);
     await Promise.all(
       batch.map(async (row) => {
         try {
@@ -1889,6 +1880,73 @@ async function supersedePendingDraftsWithStaleContext(
       })
     );
   }
+}
+
+async function leasePendingDraftsForStaleContextSweep(db: QueryableDb): Promise<PendingDraftContextCheckRow[]> {
+  return withDbTransaction(db, async (txDb) => {
+    const cursor = await lockStaleContextSweepCursor(txDb);
+    const firstWindow = await selectPendingDraftsForStaleSweep(txDb, cursor);
+    const selected = firstWindow.length > 0 ? firstWindow : cursor > 0 ? await selectPendingDraftsForStaleSweep(txDb, 0) : [];
+    const nextCursor = selected.length > 0 ? selected[selected.length - 1].draft_id : 0;
+    await updateStaleContextSweepCursor(txDb, nextCursor);
+    return selected;
+  });
+}
+
+async function lockStaleContextSweepCursor(db: QueryableDb): Promise<number> {
+  await db.query(
+    `INSERT INTO action_runtime_state (key, value_text)
+     VALUES ($1, '0')
+     ON CONFLICT (key) DO NOTHING`,
+    [ACTION_BRIEF_STALE_CONTEXT_SWEEP_CURSOR_KEY]
+  );
+  const result = await db.query<ActionRuntimeStateRow>(
+    `SELECT value_text
+     FROM action_runtime_state
+     WHERE key = $1
+     FOR UPDATE`,
+    [ACTION_BRIEF_STALE_CONTEXT_SWEEP_CURSOR_KEY]
+  );
+  const raw = result.rows[0]?.value_text ?? '0';
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+async function updateStaleContextSweepCursor(db: QueryableDb, cursor: number): Promise<void> {
+  await db.query(
+    `UPDATE action_runtime_state
+     SET value_text = $2,
+         updated_at = now()
+     WHERE key = $1`,
+    [ACTION_BRIEF_STALE_CONTEXT_SWEEP_CURSOR_KEY, String(Math.max(0, cursor))]
+  );
+}
+
+async function selectPendingDraftsForStaleSweep(
+  db: QueryableDb,
+  minDraftIdExclusive: number
+): Promise<PendingDraftContextCheckRow[]> {
+  const result = await db.query<PendingDraftContextCheckRow>(
+    `SELECT
+       d.id AS draft_id,
+       d.action_item_id,
+       d.context_hash,
+       ai.source_contact,
+       ai.source_thread
+     FROM action_drafts d
+     INNER JOIN action_items ai ON ai.id = d.action_item_id
+     WHERE d.status = 'pending'
+       AND ai.status NOT IN ('resolved', 'dropped')
+       AND d.id > $1
+     ORDER BY d.id ASC
+     LIMIT $2`,
+    [minDraftIdExclusive, ACTION_BRIEF_STALE_CONTEXT_SWEEP_CAP]
+  );
+  return result.rows.map((row) => ({
+    ...row,
+    draft_id: Number(row.draft_id),
+    action_item_id: Number(row.action_item_id),
+  }));
 }
 
 function doesContextHashMatch(

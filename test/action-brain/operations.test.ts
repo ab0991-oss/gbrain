@@ -1152,6 +1152,62 @@ describe('Action Brain operation integration', () => {
     });
   });
 
+  test('action_brief stale-context sweep progresses past unchanged head window across bounded runs', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const db = (engine as unknown as EngineWithDb).db;
+      const actionBrief = getActionOperation('action_brief');
+      const unchangedContext = await buildActionDraftContextSource(engine, {
+        source_contact: '',
+        source_thread: '',
+      });
+
+      for (let idx = 0; idx < ACTION_BRIEF_STALE_CONTEXT_SWEEP_CAP; idx += 1) {
+        await seedActionItemAndDraft(engine, {
+          title: `Unchanged window ${idx}`,
+          sourceContact: '',
+          sourceThread: '',
+          contextHash: unchangedContext.context_hash,
+        });
+      }
+
+      const staleSeed = await seedActionItemAndDraft(engine, {
+        title: 'Late stale draft',
+        sourceContact: '',
+        sourceThread: '',
+        contextHash: 'stale-window-tail-hash',
+      });
+
+      await actionBrief.handler(ctx, {});
+
+      const firstPassStatus = await db.query<{ status: string }>(
+        `SELECT status
+         FROM action_drafts
+         WHERE id = $1`,
+        [staleSeed.draftId]
+      );
+      expect(firstPassStatus.rows[0]?.status).toBe('pending');
+
+      await actionBrief.handler(ctx, {});
+
+      const secondPassStatus = await db.query<{ status: string }>(
+        `SELECT status
+         FROM action_drafts
+         WHERE id = $1`,
+        [staleSeed.draftId]
+      );
+      expect(secondPassStatus.rows[0]?.status).toBe('superseded');
+
+      const supersededHistory = await db.query(
+        `SELECT count(*)::int AS n
+         FROM action_history
+         WHERE item_id = $1
+           AND event_type = 'draft_superseded'`,
+        [staleSeed.itemId]
+      );
+      expect(Number((supersededHistory.rows[0] as { n: number | string }).n)).toBe(1);
+    });
+  });
+
   test('action_draft_regenerate logs draft_skipped when recipient is unavailable', async () => {
     await withActionContext(async (ctx, engine) => {
       const db = (engine as unknown as EngineWithDb).db;

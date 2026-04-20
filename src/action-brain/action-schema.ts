@@ -108,6 +108,12 @@ CREATE TABLE IF NOT EXISTS action_drafts (
 CREATE INDEX IF NOT EXISTS action_drafts_item_idx ON action_drafts(action_item_id);
 CREATE INDEX IF NOT EXISTS action_drafts_status_idx ON action_drafts(status);
 
+CREATE TABLE IF NOT EXISTS action_runtime_state (
+  key         TEXT PRIMARY KEY,
+  value_text  TEXT NOT NULL,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS action_drops (
   id                SERIAL PRIMARY KEY,
   run_id            TEXT NOT NULL,
