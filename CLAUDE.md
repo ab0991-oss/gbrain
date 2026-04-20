@@ -180,6 +180,8 @@ parity), `test/cli.test.ts` (CLI structure), `test/config.test.ts` (config redac
 `test/action-brain/extractor.test.ts` (extraction, source ID stability, injection defense, timestamp bounds),
 `test/action-brain/brief.test.ts` (brief generation, scoring, dedup, overdue detection),
 `test/action-brain/operations.test.ts` (all 5 ops, ingest trust boundary, batch fallbacks, low-confidence drop audit trail).
+`test/action-brain/gold-set.test.ts` (gold-set recall CI gate: `>= 90%` recall on 13-message synthetic fixture via `DeterministicGoldSetClient`, drop-one regression guard, private corpus contract via `ACTION_BRAIN_PRIVATE_GOLD_SET_PATH`).
+`test/action-brain/fixtures/gold-set.jsonl` — checked-in 13-row synthetic fixture for CI recall gate (no PII; private corpus stays out-of-repo via env var).
 `test/action-brain/collector.test.ts` (wacli collector: checkpoint store, stale lock reclaim, cross-process lock, overlap regression, stale orphan lock without owner metadata).
 `test/check-resolvable.test.ts` (resolver reachability, MECE overlap, gap detection, DRY checks),
 `test/backoff.test.ts` (load-aware throttling, concurrency limits, active hours),

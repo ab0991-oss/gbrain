@@ -16,12 +16,20 @@ All notable changes to GBrain will be documented in this file.
 
 ## [0.13.5] - 2026-04-20
 
+### Added
+
+- **Gold-set recall CI gate now ships as a deterministic extractor-path test.** Added the checked-in 13-message synthetic fixture at `test/action-brain/fixtures/gold-set.jsonl` and a `>= 0.90` recall gate in `test/action-brain/gold-set.test.ts` that runs in the standard `bun test` lane. The test uses `DeterministicGoldSetClient` to keep runs deterministic and zero-network while still routing predictions through the real `extractCommitments` path so parser/normalization/trust-boundary logic is exercised. Added a drop-one regression guard proving the gate fails when an expected commitment is removed. The larger private validation corpus remains out of repo and is wired via `ACTION_BRAIN_PRIVATE_GOLD_SET_PATH` (same JSONL schema, minimum 50 rows). (GIT-175)
+
 ### Fixed
 
 - **Stale lock reclaim without owner metadata in wacli command mode.** The collector now handles the edge case where a stale lock directory exists but contains no `owner.json` — previously this path could leave the lock in place or throw unexpectedly. The fix reclaims the lock by stat-checking age and deleting safely. Regression tests cover both the no-metadata wacli path and the orphan lock reclaim path in concurrent execution. (GIT-46)
 
 ### Itemized changes
 
+- `test/action-brain/gold-set.test.ts` — deterministic extractor-path recall gate with `>= 0.90` threshold and drop-one regression guard
+- `test/action-brain/fixtures/gold-set.jsonl` — checked-in synthetic 13-row fixture for CI
+- `test/action-brain/fixtures/README.md` — fixture contract and private corpus env var documentation
+- `docs/designs/action-brain/0.1c.md` — validation contract notes for checked-in fixture vs private corpus
 - `src/action-brain/collector.ts` — added `stat` to the existing named import list from `fs/promises` to enable stale lock age check without owner metadata
 - `test/action-brain/collector.test.ts` — two regression tests: stale orphan lock reclaim in wacli command mode, stale lock reclaim without owner metadata
 
