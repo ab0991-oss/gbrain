@@ -5,6 +5,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import type { Operation } from '../core/operations.ts';
 import { ActionEngine, ActionItemNotFoundError, ActionTransitionError } from './action-engine.ts';
 import { MorningBriefGenerator } from './brief.ts';
+import { buildActionDraftContextSource } from './context-source.ts';
 import {
   createEmptyExtractionRunSummary,
   extractCommitmentsWithSummary,
@@ -133,6 +134,15 @@ interface ActionItemDraftSeedRow {
   id: number;
   title: string;
   source_contact: string;
+  source_thread: string;
+}
+
+interface PendingDraftContextCheckRow {
+  draft_id: number;
+  action_item_id: number;
+  context_hash: string;
+  source_contact: string;
+  source_thread: string;
 }
 
 interface SendCommandResult {
@@ -146,10 +156,21 @@ type SendTextExecutor = (
   options: { timeoutMs: number }
 ) => Promise<SendCommandResult>;
 
+type RegeneratedDraftTextBuilder = (
+  item: ActionItemDraftSeedRow,
+  latestDraft: ActionDraftRow | null,
+  hint: string | null
+) => string;
+
 let sendTextExecutor: SendTextExecutor = defaultSendTextExecutor;
+let regeneratedDraftTextBuilder: RegeneratedDraftTextBuilder = buildRegeneratedDraftText;
 
 export function setActionDraftSendExecutorForTests(executor: SendTextExecutor | null): void {
   sendTextExecutor = executor ?? defaultSendTextExecutor;
+}
+
+export function setActionDraftRegenerateTextBuilderForTests(builder: RegeneratedDraftTextBuilder | null): void {
+  regeneratedDraftTextBuilder = builder ?? buildRegeneratedDraftText;
 }
 
 export const actionBrainOperations: Operation[] = [
@@ -205,10 +226,14 @@ export const actionBrainOperations: Operation[] = [
         description: 'Timezone offset in minutes east of UTC for due-today classification',
       },
     },
+    mutating: true,
     cliHints: { name: 'action-brief' },
     handler: async (ctx, p) => {
       const db = await ensureActionBrainSchema(ctx.engine);
       const generator = new MorningBriefGenerator(db);
+      if (!ctx.dryRun) {
+        await supersedePendingDraftsWithStaleContext(db, ctx.engine, 'system');
+      }
 
       const brief = await generator.generateMorningBrief({
         now: parseOptionalDate(p.now, 'now') ?? undefined,
@@ -679,16 +704,47 @@ export const actionBrainOperations: Operation[] = [
           throw new Error(`Action item not found: ${itemId}`);
         }
 
-        const supersededIds = await supersedePendingDrafts(txDb, itemId);
         const latestDraft = await getLatestDraftForItem(txDb, itemId);
         const recipient = latestDraft?.recipient ?? resolveRecipientForRegeneratedDraft(item);
         if (!recipient) {
-          throw new Error(`Cannot regenerate draft for action item ${itemId}: recipient is unavailable.`);
+          await insertActionHistory(txDb, item.id, 'draft_skipped', actor, {
+            reason: 'no_recipient',
+            item_id: item.id,
+            source_contact: item.source_contact,
+          });
+          return {
+            status: 'skipped' as const,
+            item_id: item.id,
+            reason: 'no_recipient' as const,
+          };
         }
 
-        const draftText = buildRegeneratedDraftText(item, latestDraft, hint);
+        let draftText: string;
+        try {
+          draftText = regeneratedDraftTextBuilder(item, latestDraft, hint);
+        } catch (error) {
+          const generationRunSummary = buildTerminalDraftGenerationFailureSummary();
+          await insertActionHistory(txDb, item.id, 'draft_generation_failed', actor, {
+            item_id: item.id,
+            error: formatError(error),
+            run_summary: generationRunSummary,
+          });
+          return {
+            status: 'generation_failed' as const,
+            item_id: item.id,
+            error: formatError(error),
+            run_summary: generationRunSummary,
+          };
+        }
+
+        const contextSource = await buildActionDraftContextSource(ctx.engine, {
+          source_contact: item.source_contact,
+          source_thread: item.source_thread,
+        });
+        const supersededIds = await supersedePendingDrafts(txDb, itemId);
         const contextSnapshot = buildRegeneratedContextSnapshot(item, latestDraft, hint);
-        const contextHash = hashContextSnapshot(contextSnapshot);
+        contextSnapshot.context_source = contextSource;
+        const contextHash = contextSource.context_hash;
         const inserted = await insertRegeneratedDraft(txDb, {
           actionItemId: item.id,
           recipient,
@@ -697,6 +753,14 @@ export const actionBrainOperations: Operation[] = [
           contextHash,
           contextSnapshot,
         });
+
+        if (supersededIds.length > 0) {
+          await insertActionHistory(txDb, item.id, 'draft_superseded', actor, {
+            item_id: item.id,
+            superseded_draft_ids: supersededIds,
+            reason: 'regenerated',
+          });
+        }
 
         await insertActionHistory(txDb, item.id, 'draft_created', actor, {
           draft_id: inserted.id,
@@ -707,10 +771,15 @@ export const actionBrainOperations: Operation[] = [
         });
 
         return {
+          status: 'regenerated' as const,
           draft: inserted,
           superseded_count: supersededIds.length,
         };
       });
+
+      if (result.status === 'skipped' || result.status === 'generation_failed') {
+        return result;
+      }
 
       return {
         status: 'regenerated',
@@ -1398,7 +1467,7 @@ async function updateDraftText(db: QueryableDb, draftId: number, text: string): 
 
 async function lockActionItemForDraft(db: QueryableDb, itemId: number): Promise<ActionItemDraftSeedRow | null> {
   const result = await db.query<ActionItemDraftSeedRow>(
-    `SELECT id, title, source_contact
+    `SELECT id, title, source_contact, source_thread
      FROM action_items
      WHERE id = $1
      FOR UPDATE`,
@@ -1456,10 +1525,6 @@ function buildRegeneratedContextSnapshot(
     source_contact: item.source_contact,
     regeneration_hint: hint ?? null,
   };
-}
-
-function hashContextSnapshot(snapshot: Record<string, unknown>): string {
-  return createHash('sha256').update(JSON.stringify(snapshot)).digest('hex');
 }
 
 async function insertRegeneratedDraft(
@@ -1689,7 +1754,7 @@ async function transitionParentActionItemAfterSend(db: QueryableDb, itemId: numb
      SET status = 'in_progress',
          updated_at = now()
      WHERE id = $1
-       AND status = 'waiting_on'`,
+       AND status IN ('waiting_on', 'open')`,
     [itemId]
   );
 }
@@ -1703,7 +1768,10 @@ async function insertActionHistory(
     | 'draft_edited'
     | 'draft_rejected'
     | 'draft_sent'
-    | 'draft_send_failed',
+    | 'draft_send_failed'
+    | 'draft_skipped'
+    | 'draft_superseded'
+    | 'draft_generation_failed',
   actor: string,
   metadata: Record<string, unknown>
 ): Promise<void> {
@@ -1712,6 +1780,68 @@ async function insertActionHistory(
      VALUES ($1, $2, $3, $4::jsonb)`,
     [itemId, eventType, actor, JSON.stringify(metadata)]
   );
+}
+
+async function supersedePendingDraftsWithStaleContext(
+  db: QueryableDb,
+  engine: BrainEngine,
+  actor: string
+): Promise<void> {
+  const result = await db.query<PendingDraftContextCheckRow>(
+    `SELECT
+       d.id AS draft_id,
+       d.action_item_id,
+       d.context_hash,
+       ai.source_contact,
+       ai.source_thread
+     FROM action_drafts d
+     INNER JOIN action_items ai ON ai.id = d.action_item_id
+     WHERE d.status = 'pending'
+       AND ai.status NOT IN ('resolved', 'dropped')
+     ORDER BY d.id ASC`
+  );
+
+  for (const row of result.rows) {
+    const currentContext = await buildActionDraftContextSource(engine, {
+      source_contact: row.source_contact,
+      source_thread: row.source_thread,
+    });
+    if (currentContext.context_hash === row.context_hash) {
+      continue;
+    }
+
+    await withDbTransaction(db, async (txDb) => {
+      const updated = await txDb.query<{ id: number; action_item_id: number }>(
+        `UPDATE action_drafts
+         SET status = 'superseded'
+         WHERE id = $1
+           AND status = 'pending'
+         RETURNING id, action_item_id`,
+        [row.draft_id]
+      );
+
+      const draft = updated.rows[0];
+      if (!draft) {
+        return;
+      }
+
+      await insertActionHistory(txDb, Number(draft.action_item_id), 'draft_superseded', actor, {
+        draft_id: Number(draft.id),
+        reason: 'context_hash_changed',
+        previous_context_hash: row.context_hash,
+        current_context_hash: currentContext.context_hash,
+      });
+    });
+  }
+}
+
+function buildTerminalDraftGenerationFailureSummary(): Record<string, number> {
+  return {
+    draft_generation_attempts: 1,
+    draft_generation_retries: 0,
+    draft_generation_timeout_failures: 0,
+    draft_generation_terminal_failures: 1,
+  };
 }
 
 function mapActionDraftState(row: ActionDraftStateRow): Record<string, unknown> {

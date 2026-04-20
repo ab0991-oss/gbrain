@@ -794,6 +794,9 @@ ACTION BRAIN
   gbrain action draft edit <draft_id> --text "..."  Update pending draft text before approval
   gbrain action draft regenerate <item_id>           Create next-version draft for an action item
 
+Notes:
+- If `source_contact` is a WhatsApp group JID (for example `1203...@g.us`), `action draft approve` sends the approved draft back to that same group thread.
+
 ADMIN
   gbrain doctor [--json] [--fast]       Health checks (resolver, skills, DB, embeddings)
   gbrain doctor --fix                   Auto-fix resolver issues

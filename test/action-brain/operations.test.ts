@@ -2,12 +2,18 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, setDefaul
 import { mergeOperationSets, operations } from '../../src/core/operations.ts';
 import type { Operation, OperationContext } from '../../src/core/operations.ts';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
-import { actionBrainOperations, setActionDraftSendExecutorForTests } from '../../src/action-brain/operations.ts';
+import {
+  actionBrainOperations,
+  setActionDraftRegenerateTextBuilderForTests,
+  setActionDraftSendExecutorForTests,
+} from '../../src/action-brain/operations.ts';
+import { buildActionDraftContextSource } from '../../src/action-brain/context-source.ts';
 
 setDefaultTimeout(15_000);
 
 afterEach(() => {
   setActionDraftSendExecutorForTests(null);
+  setActionDraftRegenerateTextBuilderForTests(null);
 });
 
 function makeOperation(name: string, cliName?: string): Operation {
@@ -63,20 +69,26 @@ async function seedActionItemAndDraft(
     title?: string;
     priorityScore?: number;
     recipient?: string;
+    sourceContact?: string;
+    sourceThread?: string;
     draftText?: string;
     version?: number;
     status?: string;
     contextHash?: string;
+    itemStatus?: string;
   }
 ): Promise<{ itemId: number; draftId: number }> {
   const db = (engine as unknown as EngineWithDb).db;
   const item = await db.query(
-    `INSERT INTO action_items (title, type, status, source_message_id, source_contact, priority_score)
-     VALUES ($1, 'follow_up', 'waiting_on', $2, 'joe@c.us', $3)
+    `INSERT INTO action_items (title, type, status, source_message_id, source_contact, source_thread, priority_score)
+     VALUES ($1, 'follow_up', $2, $3, $4, $5, $6)
      RETURNING id`,
     [
       input?.title ?? 'Follow up with Joe',
+      input?.itemStatus ?? 'waiting_on',
       `seed-msg-${Math.random().toString(36).slice(2, 10)}`,
+      input?.sourceContact ?? 'joe@c.us',
+      input?.sourceThread ?? '',
       input?.priorityScore ?? 50,
     ]
   );
@@ -217,6 +229,82 @@ describe('Action Brain operation integration', () => {
         const eventTypes = history.rows.map((row) => row.event_type);
         expect(eventTypes).toContain('draft_approved');
         expect(eventTypes).toContain('draft_sent');
+      } finally {
+        setActionDraftSendExecutorForTests(null);
+      }
+    });
+  });
+
+  test('action_draft_approve transitions open items to in_progress and never resolves them', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const { draftId, itemId } = await seedActionItemAndDraft(engine, {
+        itemStatus: 'open',
+      });
+      const db = (engine as unknown as EngineWithDb).db;
+      const actionDraftApprove = getActionOperation('action_draft_approve');
+
+      setActionDraftSendExecutorForTests(async () => ({ stdout: 'ok', stderr: '' }));
+
+      try {
+        const result = await actionDraftApprove.handler(ctx, { id: draftId });
+        expect(result.status).toBe('sent');
+
+        const actionRow = await db.query(
+          `SELECT status, resolved_at
+           FROM action_items
+           WHERE id = $1`,
+          [itemId]
+        );
+        expect(actionRow.rows[0]?.status).toBe('in_progress');
+        expect(actionRow.rows[0]?.resolved_at).toBeNull();
+      } finally {
+        setActionDraftSendExecutorForTests(null);
+      }
+    });
+  });
+
+  test('action_draft_approve sends group JID recipients exactly as-is', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const { draftId, itemId } = await seedActionItemAndDraft(engine, {
+        recipient: '120363000000000000@g.us',
+        sourceContact: '120363000000000000@g.us',
+      });
+      const db = (engine as unknown as EngineWithDb).db;
+      const actionDraftApprove = getActionOperation('action_draft_approve');
+      const calls: Array<{ command: string; args: string[] }> = [];
+
+      setActionDraftSendExecutorForTests(async (command, args) => {
+        calls.push({ command, args: [...args] });
+        return { stdout: 'ok', stderr: '' };
+      });
+
+      try {
+        const result = await actionDraftApprove.handler(ctx, { id: draftId });
+        expect(result.status).toBe('sent');
+        expect(calls).toHaveLength(1);
+        expect(calls[0]?.command).toBe('wacli');
+        expect(calls[0]?.args).toEqual([
+          'send',
+          'text',
+          '--to',
+          '120363000000000000@g.us',
+          '--message',
+          'Please send the updated docs by EOD.',
+        ]);
+
+        const approvedEvent = await db.query(
+          `SELECT metadata
+           FROM action_history
+           WHERE item_id = $1
+             AND event_type = 'draft_approved'
+           ORDER BY id DESC
+           LIMIT 1`,
+          [itemId]
+        );
+        const metadataValue = approvedEvent.rows[0]?.metadata;
+        const metadataRecord =
+          metadataValue && typeof metadataValue === 'string' ? JSON.parse(metadataValue) : metadataValue;
+        expect(metadataRecord?.recipient).toBe('120363000000000000@g.us');
       } finally {
         setActionDraftSendExecutorForTests(null);
       }
@@ -721,6 +809,8 @@ describe('Action Brain operation integration', () => {
         priorityScore: 33,
         version: 3,
         draftText: 'regen text',
+        sourceContact: '',
+        sourceThread: '',
       });
 
       const rejectResult = await actionDraftReject.handler(ctx, {
@@ -787,6 +877,179 @@ describe('Action Brain operation integration', () => {
       const metadataRecord =
         metadataValue && typeof metadataValue === 'string' ? JSON.parse(metadataValue) : metadataValue;
       expect(metadataRecord?.regenerated).toBe(true);
+    });
+  });
+
+  test('action_brief supersedes pending drafts when context_hash changes', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const db = (engine as unknown as EngineWithDb).db;
+      const actionBrief = getActionOperation('action_brief');
+
+      const { itemId, draftId } = await seedActionItemAndDraft(engine, {
+        sourceContact: '',
+        sourceThread: '',
+        contextHash: 'outdated-context-hash',
+      });
+
+      const briefResult = await actionBrief.handler(ctx, {});
+      expect(typeof briefResult.brief).toBe('string');
+
+      const draftRow = await db.query(
+        `SELECT status
+         FROM action_drafts
+         WHERE id = $1`,
+        [draftId]
+      );
+      expect(draftRow.rows[0]?.status).toBe('superseded');
+
+      const supersededEvent = await db.query(
+        `SELECT metadata
+         FROM action_history
+         WHERE item_id = $1
+           AND event_type = 'draft_superseded'
+         ORDER BY id DESC
+         LIMIT 1`,
+        [itemId]
+      );
+      const metadataValue = supersededEvent.rows[0]?.metadata;
+      const metadataRecord =
+        metadataValue && typeof metadataValue === 'string' ? JSON.parse(metadataValue) : metadataValue;
+      expect(metadataRecord?.draft_id).toBe(draftId);
+      expect(metadataRecord?.reason).toBe('context_hash_changed');
+      expect(typeof metadataRecord?.previous_context_hash).toBe('string');
+      expect(typeof metadataRecord?.current_context_hash).toBe('string');
+      expect(metadataRecord?.current_context_hash).not.toBe(metadataRecord?.previous_context_hash);
+    });
+  });
+
+  test('action_brief keeps pending drafts when context_hash is unchanged', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const db = (engine as unknown as EngineWithDb).db;
+      const actionBrief = getActionOperation('action_brief');
+
+      const { itemId, draftId } = await seedActionItemAndDraft(engine, {
+        sourceContact: '',
+        sourceThread: '',
+      });
+      const currentContext = await buildActionDraftContextSource(engine, {
+        source_contact: '',
+        source_thread: '',
+      });
+
+      await db.query(
+        `UPDATE action_drafts
+         SET context_hash = $2
+         WHERE id = $1`,
+        [draftId, currentContext.context_hash]
+      );
+
+      await actionBrief.handler(ctx, {});
+
+      const draftRow = await db.query(
+        `SELECT status
+         FROM action_drafts
+         WHERE id = $1`,
+        [draftId]
+      );
+      expect(draftRow.rows[0]?.status).toBe('pending');
+
+      const supersededCount = await db.query(
+        `SELECT count(*)::int AS n
+         FROM action_history
+         WHERE item_id = $1
+           AND event_type = 'draft_superseded'`,
+        [itemId]
+      );
+      expect(Number((supersededCount.rows[0] as { n: number | string }).n)).toBe(0);
+    });
+  });
+
+  test('action_draft_regenerate logs draft_skipped when recipient is unavailable', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const db = (engine as unknown as EngineWithDb).db;
+      const actionDraftRegenerate = getActionOperation('action_draft_regenerate');
+
+      const { itemId } = await seedActionItemAndDraft(engine, {
+        sourceContact: '',
+        recipient: '',
+      });
+
+      const result = await actionDraftRegenerate.handler(ctx, {
+        item_id: itemId,
+      });
+      expect(result.status).toBe('skipped');
+      expect(result.reason).toBe('no_recipient');
+
+      const draftCount = await db.query(
+        `SELECT count(*)::int AS n
+         FROM action_drafts
+         WHERE action_item_id = $1`,
+        [itemId]
+      );
+      expect(Number((draftCount.rows[0] as { n: number | string }).n)).toBe(1);
+
+      const skippedEvent = await db.query(
+        `SELECT metadata
+         FROM action_history
+         WHERE item_id = $1
+           AND event_type = 'draft_skipped'
+         ORDER BY id DESC
+         LIMIT 1`,
+        [itemId]
+      );
+      const metadataValue = skippedEvent.rows[0]?.metadata;
+      const metadataRecord =
+        metadataValue && typeof metadataValue === 'string' ? JSON.parse(metadataValue) : metadataValue;
+      expect(metadataRecord?.reason).toBe('no_recipient');
+      expect(metadataRecord?.item_id).toBe(itemId);
+    });
+  });
+
+  test('action_draft_regenerate logs draft_generation_failed and persists no new draft when generation fails', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const db = (engine as unknown as EngineWithDb).db;
+      const actionDraftRegenerate = getActionOperation('action_draft_regenerate');
+
+      const { itemId } = await seedActionItemAndDraft(engine, {
+        sourceContact: 'joe@c.us',
+      });
+
+      setActionDraftRegenerateTextBuilderForTests(() => {
+        throw new Error('simulated draft generation terminal failure');
+      });
+
+      try {
+        const result = await actionDraftRegenerate.handler(ctx, {
+          item_id: itemId,
+        });
+        expect(result.status).toBe('generation_failed');
+        expect(result.run_summary?.draft_generation_terminal_failures).toBe(1);
+
+        const draftCount = await db.query(
+          `SELECT count(*)::int AS n
+           FROM action_drafts
+           WHERE action_item_id = $1`,
+          [itemId]
+        );
+        expect(Number((draftCount.rows[0] as { n: number | string }).n)).toBe(1);
+
+        const failureEvent = await db.query(
+          `SELECT metadata
+           FROM action_history
+           WHERE item_id = $1
+             AND event_type = 'draft_generation_failed'
+           ORDER BY id DESC
+           LIMIT 1`,
+          [itemId]
+        );
+        const metadataValue = failureEvent.rows[0]?.metadata;
+        const metadataRecord =
+          metadataValue && typeof metadataValue === 'string' ? JSON.parse(metadataValue) : metadataValue;
+        expect(String(metadataRecord?.error)).toContain('terminal failure');
+        expect(metadataRecord?.run_summary?.draft_generation_terminal_failures).toBe(1);
+      } finally {
+        setActionDraftRegenerateTextBuilderForTests(null);
+      }
     });
   });
 

@@ -151,6 +151,7 @@ Key commands added for Action Brain 0.2 draft approvals:
 - `gbrain action draft list` — list pending/sent/failed drafts by priority.
 - `gbrain action draft show <draft_id>` — display full draft text plus context snapshot.
 - `gbrain action draft approve <draft_id>` — atomic approve + WhatsApp send path.
+- `gbrain action draft approve <draft_id>` keeps WhatsApp group context: if `source_contact` is a group JID (for example `1203...@g.us`), send goes to that group JID.
 - `gbrain action draft reject <draft_id> [--reason "..."]` — mark draft rejected with audit reason.
 - `gbrain action draft edit <draft_id> --text "..."` — update pending draft text before approval.
 - `gbrain action draft regenerate <item_id> [--hint "..."]` — create next-version draft for an action item.
