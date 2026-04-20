@@ -43,6 +43,7 @@ describe('buildActionDraftContextSource', () => {
       source_thread: '',
     });
 
+    expect(context.context_fetch_degraded).toBe(false);
     expect(context.gbrain_page_slugs.length).toBe(ACTION_DRAFT_CONTEXT_PAGE_LIMIT);
     expect(context.gbrain_page_slugs).toEqual(['people/alice', 'companies/nova', 'people/bob']);
     expect(context.excerpts.map((excerpt) => excerpt.slug)).toEqual(context.gbrain_page_slugs);
@@ -61,6 +62,7 @@ describe('buildActionDraftContextSource', () => {
       source_thread: '',
     });
 
+    expect(context.context_fetch_degraded).toBe(false);
     expect(context.excerpts[0]?.text.length).toBe(ACTION_DRAFT_CONTEXT_PAGE_EXCERPT_MAX_CHARS);
     expect(context.excerpts[0]?.text).not.toContain('TAIL');
   });
@@ -91,6 +93,7 @@ describe('buildActionDraftContextSource', () => {
     const excerptChars = context.excerpts.reduce((sum, excerpt) => sum + excerpt.text.length, 0);
     const threadChars = context.thread.reduce((sum, message) => sum + message.text.length, 0);
 
+    expect(context.context_fetch_degraded).toBe(false);
     expect(excerptChars + threadChars).toBeLessThanOrEqual(ACTION_DRAFT_CONTEXT_MAX_CHARS);
     expect(context.gbrain_page_slugs).toEqual(['people/alice', 'people/bob', 'people/carol']);
     expect(context.thread[0]?.sender).not.toBe('Oldest');
@@ -115,9 +118,34 @@ describe('buildActionDraftContextSource', () => {
       }
     );
 
+    expect(context.context_fetch_degraded).toBe(true);
     expect(context.gbrain_page_slugs).toEqual([]);
     expect(context.excerpts).toEqual([]);
     expect(context.thread).toEqual([{ sender: 'Ops', ts: '2026-04-20T10:00:00.000Z', text: 'Any update?' }]);
+  });
+
+  test('marks context as degraded when thread fetch fails and returns empty thread', async () => {
+    const engine = createEngine({
+      searchKeyword: async () => [{ slug: 'people/alice' }],
+      getPage: async () => ({ compiled_truth: 'Alice context' }),
+    });
+
+    const context = await buildActionDraftContextSource(
+      engine,
+      {
+        source_contact: 'Alice',
+        source_thread: 'ops-thread',
+      },
+      {
+        threadMessagesRunner: async () => {
+          throw new Error('wacli temporarily unavailable');
+        },
+      }
+    );
+
+    expect(context.context_fetch_degraded).toBe(true);
+    expect(context.thread).toEqual([]);
+    expect(context.gbrain_page_slugs).toEqual(['people/alice']);
   });
 
   test('context_hash is stable across identical inputs', async () => {

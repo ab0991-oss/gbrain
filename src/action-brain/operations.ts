@@ -698,6 +698,15 @@ export const actionBrainOperations: Operation[] = [
         return { dry_run: true, action: 'action_draft_regenerate', item_id: itemId, hint };
       }
 
+      const contextSeed = await getActionItemForDraft(db, itemId);
+      if (!contextSeed) {
+        throw new Error(`Action item not found: ${itemId}`);
+      }
+      const stagedContextSource = await buildActionDraftContextSource(ctx.engine, {
+        source_contact: contextSeed.source_contact,
+        source_thread: contextSeed.source_thread,
+      });
+
       const result = await withDbTransaction(db, async (txDb) => {
         const item = await lockActionItemForDraft(txDb, itemId);
         if (!item) {
@@ -737,14 +746,10 @@ export const actionBrainOperations: Operation[] = [
           };
         }
 
-        const contextSource = await buildActionDraftContextSource(ctx.engine, {
-          source_contact: item.source_contact,
-          source_thread: item.source_thread,
-        });
         const supersededIds = await supersedePendingDrafts(txDb, itemId);
         const contextSnapshot = buildRegeneratedContextSnapshot(item, latestDraft, hint);
-        contextSnapshot.context_source = contextSource;
-        const contextHash = contextSource.context_hash;
+        contextSnapshot.context_source = stagedContextSource;
+        const contextHash = stagedContextSource.context_hash;
         const inserted = await insertRegeneratedDraft(txDb, {
           actionItemId: item.id,
           recipient,
@@ -1476,6 +1481,16 @@ async function lockActionItemForDraft(db: QueryableDb, itemId: number): Promise<
   return result.rows[0] ?? null;
 }
 
+async function getActionItemForDraft(db: QueryableDb, itemId: number): Promise<ActionItemDraftSeedRow | null> {
+  const result = await db.query<ActionItemDraftSeedRow>(
+    `SELECT id, title, source_contact, source_thread
+     FROM action_items
+     WHERE id = $1`,
+    [itemId]
+  );
+  return result.rows[0] ?? null;
+}
+
 async function supersedePendingDrafts(db: QueryableDb, itemId: number): Promise<number[]> {
   const result = await db.query<{ id: number | string }>(
     `UPDATE action_drafts
@@ -1806,6 +1821,9 @@ async function supersedePendingDraftsWithStaleContext(
       source_contact: row.source_contact,
       source_thread: row.source_thread,
     });
+    if (currentContext.context_fetch_degraded) {
+      continue;
+    }
     if (currentContext.context_hash === row.context_hash) {
       continue;
     }

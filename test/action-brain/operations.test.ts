@@ -964,6 +964,45 @@ describe('Action Brain operation integration', () => {
     });
   });
 
+  test('action_brief keeps pending drafts when context-source lookup is transiently degraded', async () => {
+    await withActionContext(async (ctx, engine) => {
+      const db = (engine as unknown as EngineWithDb).db;
+      const actionBrief = getActionOperation('action_brief');
+      const { draftId, itemId } = await seedActionItemAndDraft(engine, {
+        contextHash: 'stale-context-hash',
+      });
+
+      const originalSearchKeyword = engine.searchKeyword.bind(engine);
+      (engine as any).searchKeyword = async () => {
+        throw new Error('transient gbrain lookup failure');
+      };
+
+      try {
+        const result = await actionBrief.handler(ctx, {});
+        expect(typeof result.brief).toBe('string');
+      } finally {
+        (engine as any).searchKeyword = originalSearchKeyword;
+      }
+
+      const draftRow = await db.query(
+        `SELECT status
+         FROM action_drafts
+         WHERE id = $1`,
+        [draftId]
+      );
+      expect(draftRow.rows[0]?.status).toBe('pending');
+
+      const history = await db.query(
+        `SELECT count(*)::int AS n
+         FROM action_history
+         WHERE item_id = $1
+           AND event_type = 'draft_superseded'`,
+        [itemId]
+      );
+      expect(Number((history.rows[0] as { n: number | string }).n)).toBe(0);
+    });
+  });
+
   test('action_draft_regenerate logs draft_skipped when recipient is unavailable', async () => {
     await withActionContext(async (ctx, engine) => {
       const db = (engine as unknown as EngineWithDb).db;
