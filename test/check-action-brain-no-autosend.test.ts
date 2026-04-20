@@ -38,4 +38,10 @@ describe('check-action-brain-no-autosend.sh', () => {
     expect(result.stdout).toContain('autosend');
     expect(result.stderr).toContain('Found forbidden auto-send wording');
   });
+
+  test('exits 2 on nonexistent directory', () => {
+    const result = run('/nonexistent/path-does-not-exist');
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain('does not exist');
+  });
 });
