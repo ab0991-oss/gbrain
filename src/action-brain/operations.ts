@@ -37,6 +37,9 @@ const LOW_CONFIDENCE_THRESHOLD = 0.9;
 const SOURCE_EXCERPT_MAX_CHARS = 500;
 const ACTION_EXTRACTOR_VERSION = 'extractor.ts@v1';
 const ACTION_DRAFT_DEFAULT_SEND_TIMEOUT_MS = 30_000;
+const ACTION_DRAFT_SENDING_RECOVERY_MIN_GRACE_MS = 60_000;
+const ACTION_DRAFT_SENDING_RECOVERY_ERROR =
+  'delivery confirmation missing after sending timeout window; marked send_failed for manual recovery';
 const ACTION_DRAFT_DEFAULT_MODEL = 'manual';
 const ENTITY_LINK_SEARCH_LIMIT = 20;
 export const ACTION_BRIEF_SOURCE_CONTACT_LOOKUP_CONCURRENCY = 4;
@@ -468,6 +471,23 @@ export const actionBrainOperations: Operation[] = [
       });
 
       if (!claimed.claimed) {
+        if (retry && claimed.draft.status === 'sending') {
+          const sendingRecovered = await recoverStuckSendingDraftWithoutConfirmation(
+            db,
+            id,
+            actor,
+            timeoutMs
+          );
+          if (sendingRecovered) {
+            return {
+              status: 'send_failed',
+              draft: mapActionDraftRecord(sendingRecovered),
+              resumed_from_status: 'sending',
+              recovered_without_resend: true,
+            };
+          }
+        }
+
         const retryRequired =
           claimed.draft.status === 'approved' || claimed.draft.status === 'send_failed' || claimed.draft.status === 'sending';
         return {
@@ -1589,6 +1609,74 @@ async function updateDraftSendFailed(db: QueryableDb, draftId: number, sendError
          send_error = $2
      WHERE id = $1
        AND status = 'sending'
+     RETURNING *`,
+    [draftId, sendError]
+  );
+  return result.rows[0] ?? null;
+}
+
+async function recoverStuckSendingDraftWithoutConfirmation(
+  db: QueryableDb,
+  draftId: number,
+  actor: string,
+  timeoutMs: number
+): Promise<ActionDraftRow | null> {
+  return withDbTransaction(db, async (txDb) => {
+    const current = await getActionDraftStateForUpdate(txDb, draftId);
+    if (!current || current.status !== 'sending' || current.sent_at !== null) {
+      return null;
+    }
+    if (!isSendingRecoveryEligible(current.approved_at, timeoutMs)) {
+      return null;
+    }
+
+    const hasDeliveryConfirmation = await hasDraftDeliveryConfirmation(txDb, current.action_item_id, current.id);
+    if (hasDeliveryConfirmation) {
+      return null;
+    }
+
+    const recovered = await updateSendingDraftToSendFailed(txDb, draftId, ACTION_DRAFT_SENDING_RECOVERY_ERROR);
+    if (!recovered) {
+      return null;
+    }
+
+    await insertActionHistory(txDb, recovered.action_item_id, 'draft_send_failed', actor, {
+      draft_id: recovered.id,
+      error: ACTION_DRAFT_SENDING_RECOVERY_ERROR,
+      resumed_from_status: 'sending',
+      recovery_mode: 'missing_delivery_confirmation',
+    });
+
+    return recovered;
+  });
+}
+
+function isSendingRecoveryEligible(approvedAt: Date | string | null, timeoutMs: number): boolean {
+  if (!approvedAt) {
+    return false;
+  }
+
+  const approvedAtMs = toDate(approvedAt).getTime();
+  if (!Number.isFinite(approvedAtMs)) {
+    return false;
+  }
+
+  const graceMs = Math.max(timeoutMs * 2, ACTION_DRAFT_SENDING_RECOVERY_MIN_GRACE_MS);
+  return Date.now() - approvedAtMs >= graceMs;
+}
+
+async function updateSendingDraftToSendFailed(
+  db: QueryableDb,
+  draftId: number,
+  sendError: string
+): Promise<ActionDraftRow | null> {
+  const result = await db.query<ActionDraftRow>(
+    `UPDATE action_drafts
+     SET status = 'send_failed',
+         send_error = $2
+     WHERE id = $1
+       AND status = 'sending'
+       AND sent_at IS NULL
      RETURNING *`,
     [draftId, sendError]
   );
